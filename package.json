@@ -1,9 +1,9 @@
 {
-  "name": "opencode-copilot-auth",
-  "version": "0.0.11",
+  "name": "occo",
+  "version": "0.1.0",
   "main": "./index.mjs",
   "devDependencies": {
-    "@opencode-ai/plugin": "^0.4.45"
+    "@opencode-ai/plugin": "^1.2.10"
   },
   "dependencies": {}
 }

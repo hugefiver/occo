@@ -1,12 +1,12 @@
 /**
  * @type {import('@opencode-ai/plugin').Plugin}
  */
-export async function CopilotAuthPlugin({ client }) {
+export async function OccoPlugin({ client }) {
   const CLIENT_ID = "Iv1.b507a08c87ecfe98";
   const HEADERS = {
-    "User-Agent": "GitHubCopilotChat/0.35.0",
-    "Editor-Version": "vscode/1.107.0",
-    "Editor-Plugin-Version": "copilot-chat/0.35.0",
+    "User-Agent": "GitHubCopilotChat/0.37.8",
+    "Editor-Version": "vscode/1.109.5",
+    "Editor-Plugin-Version": "copilot-chat/0.37.8",
     "Copilot-Integration-Id": "vscode-chat",
   };
   const RESPONSES_API_ALTERNATE_INPUT_TYPES = [
@@ -41,7 +41,7 @@ export async function CopilotAuthPlugin({ client }) {
 
   return {
     auth: {
-      provider: "github-copilot",
+      provider: "occo",
       loader: async (getAuth, provider) => {
         let info = await getAuth();
         if (!info || info.type !== "oauth") return {};
@@ -128,6 +128,18 @@ export async function CopilotAuthPlugin({ client }) {
                 );
               }
 
+              const session = await client.session
+                .get({
+                  path: {
+                    id: incoming.sessionID,
+                  },
+                  query: {
+                    directory: input.directory,
+                  },
+                  throwOnError: true,
+                })
+                .catch(() => undefined);
+
               if (body?.input) {
                 const lastInput = body.input[body.input.length - 1];
 
@@ -135,7 +147,8 @@ export async function CopilotAuthPlugin({ client }) {
                 const hasAgentType = lastInput?.type
                   ? RESPONSES_API_ALTERNATE_INPUT_TYPES.includes(lastInput.type)
                   : false;
-                isAgentCall = isAssistant || hasAgentType;
+                isAgentCall =
+                  session.data?.parentID || isAssistant || hasAgentType;
 
                 isVisionRequest =
                   Array.isArray(lastInput?.content) &&
