@@ -1,7 +1,7 @@
 /**
  * @type {import('@opencode-ai/plugin').Plugin}
  */
-export async function OccoPlugin({ client }) {
+export async function OccoAuthPlugin({ client }) {
   const CLIENT_ID = "Iv1.b507a08c87ecfe98";
   const HEADERS = {
     "User-Agent": "GitHubCopilotChat/0.37.8",
