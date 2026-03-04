@@ -1,0 +1,172 @@
+diff --git a/packages/opencode/src/bun/index.ts b/packages/opencode/src/bun/index.ts
+index e3bddcc..f84236a 100644
+--- a/packages/opencode/src/bun/index.ts
++++ b/packages/opencode/src/bun/index.ts
+@@ -58,7 +58,10 @@ export namespace BunProc {
+     // Use lock to ensure only one install at a time
+     using _ = await Lock.write("bun-install")
+ 
+-    const mod = path.join(Global.Path.cache, "node_modules", pkg)
++    // For github: specifiers, Bun installs packages under their name from package.json
++    // (e.g., "occo"), not under the specifier (e.g., "github:hugefiver/occo").
++    // We need to resolve the actual module name for correct path construction.
++    const isGitHub = pkg.startsWith("github:")
+     const pkgjsonPath = path.join(Global.Path.cache, "package.json")
+     const parsed = await Filesystem.readJson<{ dependencies: Record<string, string> }>(pkgjsonPath).catch(async () => {
+       const result = { dependencies: {} as Record<string, string> }
+@@ -67,17 +70,35 @@ export namespace BunProc {
+     })
+     if (!parsed.dependencies) parsed.dependencies = {} as Record<string, string>
+     const dependencies = parsed.dependencies
++
++    // Resolve the actual module name for path construction and cache lookup
++    let modName = pkg
++    if (isGitHub) {
++      const ghPath = pkg.replace("github:", "")
++      // Check if we already have a cached entry for this github package
++      const existingEntry = Object.entries(dependencies).find(
++        ([_, v]) => typeof v === "string" && v.includes(ghPath),
++      )
++      // Use the cached name, or fall back to the repo name (last segment of github:user/repo)
++      modName = existingEntry?.[0] ?? ghPath.split("/").pop() ?? pkg
++    }
++
++    let mod = path.join(Global.Path.cache, "node_modules", modName)
+     const modExists = await Filesystem.exists(mod)
+-    const cachedVersion = dependencies[pkg]
++    const cachedVersion = dependencies[modName]
+ 
+     if (!modExists || !cachedVersion) {
+       // continue to install
+     } else if (version !== "latest" && cachedVersion === version) {
+       return mod
+     } else if (version === "latest") {
+-      const isOutdated = await PackageRegistry.isOutdated(pkg, cachedVersion, Global.Path.cache)
++      if (isGitHub) {
++        // For github packages, no registry to check — use cached version
++        return mod
++      }
++      const isOutdated = await PackageRegistry.isOutdated(modName, cachedVersion, Global.Path.cache)
+       if (!isOutdated) return mod
+-      log.info("Cached version is outdated, proceeding with install", { pkg, cachedVersion })
++      log.info("Cached version is outdated, proceeding with install", { pkg: modName, cachedVersion })
+     }
+ 
+     // Build command arguments
+@@ -89,7 +110,8 @@ export namespace BunProc {
+       ...(proxied() || process.env.CI ? ["--no-cache"] : []),
+       "--cwd",
+       Global.Path.cache,
+-      pkg + "@" + version,
++      // For github: specifiers, don't append @version (Bun uses #ref syntax for git refs)
++      isGitHub && version === "latest" ? pkg : `${pkg}@${version}`,
+     ]
+ 
+     // Let Bun handle registry resolution:
+@@ -112,6 +134,22 @@ export namespace BunProc {
+       )
+     })
+ 
++    // For github packages, re-resolve the actual module name after install
++    // since Bun updates package.json with the real package name
++    if (isGitHub) {
++      const updatedParsed = await Filesystem.readJson<{ dependencies: Record<string, string> }>(pkgjsonPath).catch(() => null)
++      if (updatedParsed?.dependencies) {
++        const ghPath = pkg.replace("github:", "")
++        const entry = Object.entries(updatedParsed.dependencies).find(
++          ([_, v]) => typeof v === "string" && v.includes(ghPath),
++        )
++        if (entry) {
++          modName = entry[0]
++          mod = path.join(Global.Path.cache, "node_modules", modName)
++        }
++      }
++    }
++
+     // Resolve actual version from installed package when using "latest"
+     // This ensures subsequent starts use the cached version until explicitly updated
+     let resolvedVersion = version
+@@ -124,7 +162,7 @@ export namespace BunProc {
+       }
+     }
+ 
+-    parsed.dependencies[pkg] = resolvedVersion
++    parsed.dependencies[modName] = resolvedVersion
+     await Filesystem.writeJson(pkgjsonPath, parsed)
+     return mod
+   }
+diff --git a/packages/opencode/src/provider/error.ts b/packages/opencode/src/provider/error.ts
+index 0db0357..0c7882f 100644
+--- a/packages/opencode/src/provider/error.ts
++++ b/packages/opencode/src/provider/error.ts
+@@ -40,7 +40,7 @@ export namespace ProviderError {
+   }
+ 
+   function error(providerID: string, error: APICallError) {
+-    if (providerID.includes("github-copilot") && error.statusCode === 403) {
++    if ((providerID.includes("github-copilot") || providerID === "occo") && error.statusCode === 403) {
+       return "Please reauthenticate with the copilot provider to ensure your credentials work properly with OpenCode."
+     }
+ 
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 022ec31..de7d0aa 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -169,6 +169,16 @@ export namespace Provider {
+         options: {},
+       }
+     },
++    occo: async () => {
++      return {
++        autoload: true,
++        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
++          if (sdk.responses === undefined && sdk.chat === undefined) return sdk.languageModel(modelID)
++          return shouldUseCopilotResponsesApi(modelID) ? sdk.responses(modelID) : sdk.chat(modelID)
++        },
++        options: {},
++      }
++    },
+     "github-copilot-enterprise": async () => {
+       return {
+         autoload: false,
+@@ -964,7 +974,17 @@ export namespace Provider {
+       if (disabled.has(providerID)) continue
+       const data = database[providerID]
+       if (!data) {
+-        log.error("Provider does not exist in model list " + providerID)
++        // Plugin-injected providers (e.g. "occo") won't exist in models.dev database
++        // but still need their custom loader registered for correct API routing
++        const configData = configProviders.find(([id]) => id === providerID)
++        if (!configData) {
++          log.error("Provider does not exist in model list " + providerID)
++          continue
++        }
++        const result = await fn({ id: providerID, env: [], models: {} } as any)
++        if (result) {
++          if (result.getModel) modelLoaders[providerID] = result.getModel
++        }
+         continue
+       }
+       const result = await fn(data)
+@@ -1231,7 +1251,7 @@ export namespace Provider {
+       if (providerID.startsWith("opencode")) {
+         priority = ["gpt-5-nano"]
+       }
+-      if (providerID.startsWith("github-copilot")) {
++      if (providerID.startsWith("github-copilot") || providerID === "occo") {
+         // prioritize free models for github copilot
+         priority = ["gpt-5-mini", "claude-haiku-4.5", ...priority]
+       }
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+index 4e42fb0..fa5fb4c 100644
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -145,7 +145,7 @@ export namespace LLM {
+     )
+ 
+     const maxOutputTokens =
+-      isCodex || provider.id.includes("github-copilot") ? undefined : ProviderTransform.maxOutputTokens(input.model)
++      isCodex || provider.id.includes("github-copilot") || provider.id === "occo" ? undefined : ProviderTransform.maxOutputTokens(input.model)
+ 
+     const tools = await resolveTools(input)
+ 
