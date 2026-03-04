@@ -148,6 +148,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 64000, output: 16384 },
+      variants: GPT_REASONING_VARIANTS,
     },
     "gpt-4o": {
       name: "GPT-4o",
@@ -155,6 +156,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 64000, output: 4096 },
+      variants: GPT_REASONING_VARIANTS,
     },
     "gpt-5-mini": {
       name: "GPT-5 mini",
@@ -207,6 +209,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 128000, output: 64000 },
+      variants: GPT_REASONING_XHIGH_VARIANTS,
     },
     "gpt-5.2-codex": {
       name: "GPT-5.2-Codex",
@@ -214,6 +217,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 272000, output: 128000 },
+      variants: GPT_REASONING_XHIGH_VARIANTS,
     },
     "gpt-5.3-codex": {
       name: "GPT-5.3-Codex",
@@ -221,6 +225,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 272000, output: 128000 },
+      variants: GPT_REASONING_XHIGH_VARIANTS,
     },
     // --- Other models ---
     "grok-code-fast-1": {
@@ -229,6 +234,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text"], output: ["text"] },
       limit: { context: 128000, output: 64000 },
+      variants: GPT_REASONING_VARIANTS,
     },
     "raptor-mini": {
       name: "Raptor mini",
@@ -236,6 +242,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 200000, output: 64000 },
+      variants: GPT_REASONING_VARIANTS,
     },
   };
 
