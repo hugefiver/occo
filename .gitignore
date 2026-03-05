@@ -1,9 +1,2 @@
 node_modules
 .DS_Store
-nul
-
-# Reference source (not part of plugin)
-opencode/
-opencode-real/
-oh-my-opencode/
-models-dev-api.json
