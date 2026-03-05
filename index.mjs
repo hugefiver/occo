@@ -3,15 +3,19 @@
  */
 export async function OccoAuthPlugin({ client }) {
   const CLIENT_ID = "Iv1.b507a08c87ecfe98";
-  const BASE_URL = "https://api.githubcopilot.com";
+  const DEFAULT_API_URL = "https://api.githubcopilot.com";
   const TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
   const POLLING_MARGIN_MS = 3000;
   const HEADERS = {
-    "User-Agent": "GitHubCopilotChat/0.37.8",
-    "Editor-Version": "vscode/1.109.5",
-    "Editor-Plugin-Version": "copilot-chat/0.37.8",
+    "User-Agent": "GitHubCopilotChat/0.38.0",
+    "Editor-Version": "vscode/1.110.0",
+    "Editor-Plugin-Version": "copilot-chat/0.38.0",
     "Copilot-Integration-Id": "vscode-chat",
+    "X-GitHub-Api-Version": "2025-10-01",
   };
+
+  // Resolved dynamically from token response's endpoints.api
+  let resolvedApiUrl = DEFAULT_API_URL;
 
   // ---------------------------------------------------------------------------
   // Hardcoded model definitions (avoids network fetch during plugin init which
@@ -24,16 +28,6 @@ export async function OccoAuthPlugin({ client }) {
   };
   const GPT_REASONING_VARIANTS = Object.fromEntries(
     ["low", "medium", "high"].map((effort) => [
-      effort,
-      {
-        reasoningEffort: effort,
-        reasoningSummary: "auto",
-        include: ["reasoning.encrypted_content"],
-      },
-    ]),
-  );
-  const GPT_REASONING_XHIGH_VARIANTS = Object.fromEntries(
-    ["low", "medium", "high", "xhigh"].map((effort) => [
       effort,
       {
         reasoningEffort: effort,
@@ -72,15 +66,6 @@ export async function OccoAuthPlugin({ client }) {
       limit: { context: 128000, output: 64000 },
       variants: CLAUDE_VARIANTS,
     },
-    "claude-opus-4.6-fast": {
-      name: "Claude Opus 4.6 (fast mode)",
-      reasoning: true,
-      tool_call: true,
-      temperature: true,
-      modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 64000 },
-      variants: CLAUDE_VARIANTS,
-    },
     "claude-sonnet-4": {
       name: "Claude Sonnet 4",
       reasoning: true,
@@ -108,7 +93,7 @@ export async function OccoAuthPlugin({ client }) {
       limit: { context: 128000, output: 32000 },
       variants: CLAUDE_VARIANTS,
     },
-    // --- Gemini models (no variants — Copilot only returns thinking, no effort control) ---
+    // --- Gemini models (no variants — Copilot doesn't expose effort control for Gemini) ---
     "gemini-2.5-pro": {
       name: "Gemini 2.5 Pro",
       reasoning: true,
@@ -117,29 +102,29 @@ export async function OccoAuthPlugin({ client }) {
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 128000, output: 64000 },
     },
-    "gemini-3-flash": {
+    "gemini-3-flash-preview": {
       name: "Gemini 3 Flash (Preview)",
       reasoning: true,
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 109000, output: 64000 },
+      limit: { context: 128000, output: 64000 },
     },
-    "gemini-3-pro": {
+    "gemini-3-pro-preview": {
       name: "Gemini 3 Pro (Preview)",
       reasoning: true,
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 109000, output: 64000 },
+      limit: { context: 128000, output: 64000 },
     },
-    "gemini-3.1-pro": {
+    "gemini-3.1-pro-preview": {
       name: "Gemini 3.1 Pro (Preview)",
       reasoning: true,
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 109000, output: 64000 },
+      limit: { context: 128000, output: 64000 },
     },
     // --- GPT models ---
     "gpt-4.1": {
@@ -192,7 +177,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 128000, output: 128000 },
-      variants: GPT_REASONING_XHIGH_VARIANTS,
+      variants: GPT_REASONING_VARIANTS,
     },
     "gpt-5.1-codex-mini": {
       name: "GPT-5.1-Codex-Mini",
@@ -209,7 +194,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 128000, output: 64000 },
-      variants: GPT_REASONING_XHIGH_VARIANTS,
+      variants: GPT_REASONING_VARIANTS,
     },
     "gpt-5.2-codex": {
       name: "GPT-5.2-Codex",
@@ -217,7 +202,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 272000, output: 128000 },
-      variants: GPT_REASONING_XHIGH_VARIANTS,
+      variants: GPT_REASONING_VARIANTS,
     },
     "gpt-5.3-codex": {
       name: "GPT-5.3-Codex",
@@ -225,7 +210,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 272000, output: 128000 },
-      variants: GPT_REASONING_XHIGH_VARIANTS,
+      variants: GPT_REASONING_VARIANTS,
     },
     // --- Other models ---
     "grok-code-fast-1": {
@@ -234,14 +219,6 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text"], output: ["text"] },
       limit: { context: 128000, output: 64000 },
-      variants: GPT_REASONING_VARIANTS,
-    },
-    "raptor-mini": {
-      name: "Raptor mini",
-      tool_call: true,
-      temperature: true,
-      modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 200000, output: 64000 },
       variants: GPT_REASONING_VARIANTS,
     },
   };
@@ -255,7 +232,7 @@ export async function OccoAuthPlugin({ client }) {
       config.provider.occo = {
         name: "GitHub Copilot (OCCO)",
         npm: "@ai-sdk/github-copilot",
-        api: BASE_URL,
+        api: DEFAULT_API_URL,
         models: MODELS,
       };
     },
@@ -293,7 +270,7 @@ export async function OccoAuthPlugin({ client }) {
         }
 
         return {
-          baseURL: BASE_URL,
+          baseURL: resolvedApiUrl,
           apiKey: "",
           async fetch(input, init) {
             const info = await getAuth();
@@ -312,6 +289,12 @@ export async function OccoAuthPlugin({ client }) {
                 throw new Error(`Token refresh failed: ${response.status}`);
               }
               const tokenData = await response.json();
+
+              // Dynamically resolve API URL from token response
+              if (tokenData.endpoints?.api) {
+                resolvedApiUrl = tokenData.endpoints.api;
+              }
+
               await client.auth.set({
                 path: { id: "occo" },
                 body: {
@@ -322,6 +305,12 @@ export async function OccoAuthPlugin({ client }) {
                 },
               });
               info.access = tokenData.token;
+            }
+
+            // Rewrite request URL to use resolved API base
+            let url = typeof input === "string" ? input : input.url;
+            if (url.startsWith(DEFAULT_API_URL) && resolvedApiUrl !== DEFAULT_API_URL) {
+              url = url.replace(DEFAULT_API_URL, resolvedApiUrl);
             }
 
             // Detect agent calls and vision requests
@@ -380,7 +369,7 @@ export async function OccoAuthPlugin({ client }) {
             delete headers["x-api-key"];
             delete headers["authorization"];
 
-            return fetch(input, { ...init, headers });
+            return fetch(url, { ...init, headers });
           },
         };
       },
@@ -396,7 +385,7 @@ export async function OccoAuthPlugin({ client }) {
                 headers: {
                   Accept: "application/json",
                   "Content-Type": "application/json",
-                  "User-Agent": "GitHubCopilotChat/0.37.8",
+                  "User-Agent": "GitHubCopilotChat/0.38.0",
                 },
                 body: JSON.stringify({
                   client_id: CLIENT_ID,
@@ -429,7 +418,7 @@ export async function OccoAuthPlugin({ client }) {
                       headers: {
                         Accept: "application/json",
                         "Content-Type": "application/json",
-                        "User-Agent": "GitHubCopilotChat/0.37.8",
+                        "User-Agent": "GitHubCopilotChat/0.38.0",
                       },
                       body: JSON.stringify({
                         client_id: CLIENT_ID,
