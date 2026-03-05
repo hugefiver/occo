@@ -4,7 +4,10 @@
 export async function OccoAuthPlugin({ client }) {
   const CLIENT_ID = "Iv1.b507a08c87ecfe98";
   const DEFAULT_API_URL = "https://api.githubcopilot.com";
-  const MODEL_LAB_URL = "https://api-model-lab.githubcopilot.com";
+  // Default: follow Copilot Chat behavior and use token endpoints.api.
+  // Set OCCO_USE_TOKEN_ENDPOINT_API=0 to force legacy DEFAULT_API_URL.
+  const USE_TOKEN_ENDPOINT_API = process.env.OCCO_USE_TOKEN_ENDPOINT_API !== "0";
+  
   const TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
   const POLLING_MARGIN_MS = 3000;
   const HEADERS = {
@@ -15,29 +18,62 @@ export async function OccoAuthPlugin({ client }) {
     "X-GitHub-Api-Version": "2025-05-01",
   };
 
-  // Resolved dynamically from token response's endpoints.api
+  // Resolved dynamically from token response's endpoints.api (unless legacy mode)
   let resolvedApiUrl = DEFAULT_API_URL;
 
-  // Model IDs served from Model Lab (preview/experimental models).
-  // These route to api-model-lab.githubcopilot.com instead of endpoints.api.
-  const MODEL_LAB_IDS = new Set([
-    "claude-opus-4.6-fast",
-    "gemini-3-flash-preview",
-    "gemini-3-pro-preview",
-    "gemini-3.1-pro-preview",
-    "gpt-5.1-codex-mini",
-    "oswe-vscode-prime",
-  ]);
+  // ---------------------------------------------------------------------------
+  // Variant definitions
+  // ---------------------------------------------------------------------------
+
+  // Claude variants: commented out, using copilot SDK auto-config via ProviderTransform.variants()
+  // const CLAUDE_OPUS_VARIANTS = {
+  //   default: { thinking_budget: 8000 },
+  //   thinking: { thinking_budget: 8000 },
+  //   max: { thinking_budget: 32000 },
+  // };
+  // const CLAUDE_SONNET_VARIANTS = {
+  //   thinking: { thinking_budget: 4000 },
+  //   max: { thinking_budget: 32000 },
+  // };
+  // const CLAUDE_HAIKU_VARIANTS = {
+  //   thinking: { thinking_budget: 2000 },
+  //   max: { thinking_budget: 32000 },
+  // };
+
+  // GPT reasoning effort variants (for mini models): default=high
+  const GPT_REASONING_VARIANTS = {
+    default: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    low: { reasoningEffort: "low", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    medium: { reasoningEffort: "medium", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    high: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+  };
+
+  // GPT reasoning effort variants with xhigh (for gpt-5.1, gpt-5.2 non-codex): default=high
+  const GPT_REASONING_VARIANTS_XHIGH = {
+    ...GPT_REASONING_VARIANTS,
+    xhigh: { reasoningEffort: "xhigh", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+  };
+
+  // GPT Codex variants: only high (default) and xhigh
+  const GPT_CODEX_VARIANTS = {
+    default: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    high: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    xhigh: { reasoningEffort: "xhigh", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+  };
 
   // ---------------------------------------------------------------------------
   // Hardcoded model definitions from Copilot API.
-  // Variants are NOT set here — opencode's ProviderTransform.variants()
-  // computes them automatically based on model ID and @ai-sdk/github-copilot:
-  //   claude  → { thinking: { thinking_budget: 4000 } }
-  //   gemini  → {} (no variants)
-  //   gpt 5.1-codex-max/5.2/5.3 → low/medium/high/xhigh
-  //   other gpt → low/medium/high
-  //   grok    → {} (no variants)
+  // Context = min(max_context_window_tokens, max_output_tokens + max_prompt_tokens).
+  //
+  // Variant assignment:
+  //   claude         → auto (copilot SDK ProviderTransform.variants())
+  //   gemini         → no variants
+  //   gpt-5.1, gpt-5.2 (non-codex) → default(high) / low/medium/high/xhigh
+  //   gpt-5.*-codex/codex-max → default(high) / high/xhigh only
+  //   gpt-5-mini, gpt-5.1-codex-mini → no variants (mini = no reasoning)
+  //   gpt-4o/4.1    → no variants (no reasoning)
+  //   grok           → no variants
+  //   oswe/raptor    → no variants (mini = no reasoning)
   // ---------------------------------------------------------------------------
 
   const MODELS = {
@@ -48,7 +84,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 64000 },
+      limit: { context: 192000, output: 64000 },
     },
     "claude-opus-4.6": {
       name: "Claude Opus 4.6",
@@ -56,7 +92,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 64000 },
+      limit: { context: 192000, output: 64000 },
     },
     "claude-opus-4.5": {
       name: "Claude Opus 4.5",
@@ -64,7 +100,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 32000 },
+      limit: { context: 160000, output: 32000 },
     },
     "claude-sonnet-4.6": {
       name: "Claude Sonnet 4.6",
@@ -72,7 +108,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 32000 },
+      limit: { context: 160000, output: 32000 },
     },
     "claude-sonnet-4.5": {
       name: "Claude Sonnet 4.5",
@@ -80,7 +116,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 32000 },
+      limit: { context: 160000, output: 32000 },
     },
     "claude-sonnet-4": {
       name: "Claude Sonnet 4",
@@ -88,7 +124,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 16000 },
+      limit: { context: 144000, output: 16000 },
     },
     "claude-haiku-4.5": {
       name: "Claude Haiku 4.5",
@@ -96,7 +132,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 32000 },
+      limit: { context: 160000, output: 32000 },
     },
     // --- Gemini models ---
     "gemini-2.5-pro": {
@@ -137,7 +173,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 64000, output: 4096 },
+      limit: { context: 68096, output: 4096 },
     },
     "gpt-4.1": {
       name: "GPT-4.1",
@@ -152,7 +188,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 64000 },
+      limit: { context: 192000, output: 64000 },
     },
     "gpt-5.1": {
       name: "GPT-5.1",
@@ -160,7 +196,8 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 64000 },
+      limit: { context: 192000, output: 64000 },
+      variants: GPT_REASONING_VARIANTS_XHIGH,
     },
     "gpt-5.1-codex": {
       name: "GPT-5.1-Codex",
@@ -168,7 +205,8 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 128000 },
+      limit: { context: 256000, output: 128000 },
+      variants: GPT_CODEX_VARIANTS,
     },
     "gpt-5.1-codex-mini": {
       name: "GPT-5.1-Codex-Mini",
@@ -176,7 +214,7 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 128000 },
+      limit: { context: 256000, output: 128000 },
     },
     "gpt-5.1-codex-max": {
       name: "GPT-5.1-Codex-Max",
@@ -184,28 +222,35 @@ export async function OccoAuthPlugin({ client }) {
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 128000 },
+      limit: { context: 256000, output: 128000 },
+      variants: GPT_CODEX_VARIANTS,
     },
     "gpt-5.2": {
       name: "GPT-5.2",
+      reasoning: true,
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 128000, output: 64000 },
+      limit: { context: 192000, output: 64000 },
+      variants: GPT_REASONING_VARIANTS_XHIGH,
     },
     "gpt-5.2-codex": {
       name: "GPT-5.2-Codex",
+      reasoning: true,
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 272000, output: 128000 },
+      limit: { context: 400000, output: 128000 },
+      variants: GPT_CODEX_VARIANTS,
     },
     "gpt-5.3-codex": {
       name: "GPT-5.3-Codex",
+      reasoning: true,
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 272000, output: 128000 },
+      limit: { context: 400000, output: 128000 },
+      variants: GPT_CODEX_VARIANTS,
     },
     // --- Other models ---
     "grok-code-fast-1": {
@@ -217,10 +262,11 @@ export async function OccoAuthPlugin({ client }) {
     },
     "oswe-vscode-prime": {
       name: "Raptor mini (Preview)",
+      reasoning: true,
       tool_call: true,
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 200000, output: 64000 },
+      limit: { context: 264000, output: 64000 },
     },
   };
 
@@ -271,7 +317,7 @@ export async function OccoAuthPlugin({ client }) {
         }
 
         return {
-          baseURL: resolvedApiUrl,
+          baseURL: USE_TOKEN_ENDPOINT_API ? resolvedApiUrl : DEFAULT_API_URL,
           apiKey: "",
           async fetch(input, init) {
             const info = await getAuth();
@@ -291,8 +337,8 @@ export async function OccoAuthPlugin({ client }) {
               }
               const tokenData = await response.json();
 
-              // Dynamically resolve API URL from token response
-              if (tokenData.endpoints?.api) {
+              // Dynamically resolve API URL from token response (optional)
+              if (USE_TOKEN_ENDPOINT_API && tokenData.endpoints?.api) {
                 resolvedApiUrl = tokenData.endpoints.api;
               }
 
@@ -318,19 +364,14 @@ export async function OccoAuthPlugin({ client }) {
             } catch {}
 
             // Rewrite request URL based on model source:
-            // - Model Lab models → api-model-lab.githubcopilot.com
-            // - Prod models → resolved endpoints.api URL
+            // Route to resolved prod API (all models go through endpoints.api)
             let url = typeof input === "string" ? input : input.url;
-            const requestModelId = parsedBody?.model;
 
-            if (requestModelId && MODEL_LAB_IDS.has(requestModelId)) {
-              // Route to Model Lab
-              url = url.replace(DEFAULT_API_URL, MODEL_LAB_URL);
-              if (resolvedApiUrl !== DEFAULT_API_URL) {
-                url = url.replace(resolvedApiUrl, MODEL_LAB_URL);
-              }
-            } else if (url.startsWith(DEFAULT_API_URL) && resolvedApiUrl !== DEFAULT_API_URL) {
-              // Route to resolved prod API
+            if (
+              USE_TOKEN_ENDPOINT_API &&
+              url.startsWith(DEFAULT_API_URL) &&
+              resolvedApiUrl !== DEFAULT_API_URL
+            ) {
               url = url.replace(DEFAULT_API_URL, resolvedApiUrl);
             }
 
