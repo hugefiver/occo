@@ -11,9 +11,9 @@ export async function OccoAuthPlugin({ client }) {
   const TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
   const POLLING_MARGIN_MS = 3000;
   const HEADERS = {
-    "User-Agent": "GitHubCopilotChat/0.38.2",
-    "Editor-Version": "vscode/1.110.1",
-    "Editor-Plugin-Version": "copilot-chat/0.38.2",
+    "User-Agent": "GitHubCopilotChat/0.39.0",
+    "Editor-Version": "vscode/1.111.0",
+    "Editor-Plugin-Version": "copilot-chat/0.39.0",
     "Copilot-Integration-Id": "vscode-chat",
     "X-GitHub-Api-Version": "2025-05-01",
   };
@@ -285,19 +285,13 @@ export async function OccoAuthPlugin({ client }) {
     },
 
     // -------------------------------------------------------------------------
-    // Subagent quota protection: mark subagent sessions with x-initiator header
-    // so they don't consume user's Copilot quota
+    // Fallback: ensure X-Interaction-Type is set for all chat requests
     // -------------------------------------------------------------------------
     "chat.headers": async (incoming, output) => {
       if (incoming.model.providerID !== "occo") return;
-      try {
-        const session = await client.session.get({
-          path: { id: incoming.sessionID },
-        });
-        if (session.data?.parentID) {
-          output.headers["x-initiator"] = "agent";
-        }
-      } catch {}
+      if (!output.headers["X-Interaction-Type"]) {
+        output.headers["X-Interaction-Type"] = "conversation-subagent";
+      }
     },
 
     // -------------------------------------------------------------------------
@@ -308,6 +302,9 @@ export async function OccoAuthPlugin({ client }) {
       loader: async (getAuth, provider) => {
         const info = await getAuth();
         if (!info || info.type !== "oauth") return {};
+
+        // Persistent task ID for all requests in this session
+        const sessionTaskId = crypto.randomUUID();
 
         // Zero out costs (Copilot is free)
         if (provider?.models) {
@@ -375,19 +372,12 @@ export async function OccoAuthPlugin({ client }) {
               url = url.replace(DEFAULT_API_URL, resolvedApiUrl);
             }
 
-            // Detect agent calls and vision requests
+            // Detect vision requests
             // All Copilot models (including Claude) use OpenAI-compatible format
-            let isAgent = true;
             let isVision = false;
             try {
               // Completions API: body.messages
               if (parsedBody?.messages) {
-                const last = parsedBody.messages[parsedBody.messages.length - 1];
-                isAgent =
-                  last?.role !== "user" ||
-                  (parsedBody?.messages)
-                    .map((x) => (x?.role === "user" ? 1 : 0))
-                    .reduce((acc, x) => acc + x) > 1;
                 isVision = parsedBody.messages.some(
                   (msg) =>
                     Array.isArray(msg.content) &&
@@ -397,12 +387,6 @@ export async function OccoAuthPlugin({ client }) {
 
               // Responses API: body.input
               if (parsedBody?.input) {
-                const last = parsedBody.input[parsedBody.input.length - 1];
-                isAgent =
-                  last?.role !== "user" ||
-                  (parsedBody?.input)
-                    .map((x) => (x?.role === "user" ? 1 : 0))
-                    .reduce((acc, x) => acc + x) > 1;
                 isVision = parsedBody.input.some(
                   (item) =>
                     Array.isArray(item?.content) &&
@@ -417,9 +401,9 @@ export async function OccoAuthPlugin({ client }) {
               ...HEADERS,
               Authorization: `Bearer ${info.access}`,
               "OpenAI-Intent": "conversation-panel",
-              "X-Initiator": isAgent ? "agent" : "user",
+              "X-Interaction-Type": "conversation-subagent",
               "X-Request-Id": requestId,
-              "X-Agent-Task-Id": requestId,
+              "X-Agent-Task-Id": sessionTaskId,
             };
             if (isVision) {
               headers["Copilot-Vision-Request"] = "true";
@@ -445,7 +429,7 @@ export async function OccoAuthPlugin({ client }) {
                 headers: {
                   Accept: "application/json",
                   "Content-Type": "application/json",
-                  "User-Agent": "GitHubCopilotChat/0.38.2",
+                  "User-Agent": "GitHubCopilotChat/0.39.0",
                 },
                 body: JSON.stringify({
                   client_id: CLIENT_ID,
@@ -478,7 +462,7 @@ export async function OccoAuthPlugin({ client }) {
                       headers: {
                         Accept: "application/json",
                         "Content-Type": "application/json",
-                        "User-Agent": "GitHubCopilotChat/0.38.2",
+                        "User-Agent": "GitHubCopilotChat/0.39.0",
                       },
                       body: JSON.stringify({
                         client_id: CLIENT_ID,
