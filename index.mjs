@@ -6,8 +6,9 @@ export async function OccoAuthPlugin({ client }) {
   const DEFAULT_API_URL = "https://api.githubcopilot.com";
   // Default: follow Copilot Chat behavior and use token endpoints.api.
   // Set OCCO_USE_TOKEN_ENDPOINT_API=0 to force legacy DEFAULT_API_URL.
-  const USE_TOKEN_ENDPOINT_API = process.env.OCCO_USE_TOKEN_ENDPOINT_API !== "0";
-  
+  const USE_TOKEN_ENDPOINT_API =
+    process.env.OCCO_USE_TOKEN_ENDPOINT_API !== "0";
+
   const TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
   const POLLING_MARGIN_MS = 3000;
   const HEADERS = {
@@ -20,6 +21,50 @@ export async function OccoAuthPlugin({ client }) {
 
   // Resolved dynamically from token response's endpoints.api (unless legacy mode)
   let resolvedApiUrl = DEFAULT_API_URL;
+
+  // ---------------------------------------------------------------------------
+  // Token refresh helper — reused at loader init and per-request
+  // ---------------------------------------------------------------------------
+  async function refreshTokenIfNeeded(getAuth) {
+    const info = await getAuth();
+    if (!info || info.type !== "oauth") return info;
+    if (!info.refresh) return info;
+
+    // Refresh if: no access token, or expired/about-to-expire
+    // (stored expires already has a 5-minute buffer baked in)
+    const needsRefresh = !info.access || info.expires < Date.now();
+    if (!needsRefresh) return info;
+
+    const response = await fetch(TOKEN_URL, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${info.refresh}`,
+        ...HEADERS,
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`Token refresh failed: ${response.status}`);
+    }
+    const tokenData = await response.json();
+
+    // Dynamically resolve API URL from token response (optional)
+    if (USE_TOKEN_ENDPOINT_API && tokenData.endpoints?.api) {
+      resolvedApiUrl = tokenData.endpoints.api;
+    }
+
+    await client.auth.set({
+      path: { id: "occo" },
+      body: {
+        type: "oauth",
+        refresh: info.refresh,
+        access: tokenData.token,
+        expires: tokenData.expires_at * 1000 - 5 * 60 * 1000,
+      },
+    });
+    info.access = tokenData.token;
+    info.expires = tokenData.expires_at * 1000 - 5 * 60 * 1000;
+    return info;
+  }
 
   // ---------------------------------------------------------------------------
   // Variant definitions
@@ -42,23 +87,55 @@ export async function OccoAuthPlugin({ client }) {
 
   // GPT reasoning effort variants (for mini models): default=high
   const GPT_REASONING_VARIANTS = {
-    default: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
-    low: { reasoningEffort: "low", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
-    medium: { reasoningEffort: "medium", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
-    high: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    default: {
+      reasoningEffort: "high",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
+    low: {
+      reasoningEffort: "low",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
+    medium: {
+      reasoningEffort: "medium",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
+    high: {
+      reasoningEffort: "high",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
   };
 
   // GPT reasoning effort variants with xhigh (for gpt-5.1, gpt-5.2 non-codex): default=high
   const GPT_REASONING_VARIANTS_XHIGH = {
     ...GPT_REASONING_VARIANTS,
-    xhigh: { reasoningEffort: "xhigh", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    xhigh: {
+      reasoningEffort: "xhigh",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
   };
 
   // GPT Codex variants: only high (default) and xhigh
   const GPT_CODEX_VARIANTS = {
-    default: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
-    high: { reasoningEffort: "high", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
-    xhigh: { reasoningEffort: "xhigh", reasoningSummary: "auto", include: ["reasoning.encrypted_content"] },
+    default: {
+      reasoningEffort: "high",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
+    high: {
+      reasoningEffort: "high",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
+    xhigh: {
+      reasoningEffort: "xhigh",
+      reasoningSummary: "auto",
+      include: ["reasoning.encrypted_content"],
+    },
   };
 
   // ---------------------------------------------------------------------------
@@ -68,7 +145,7 @@ export async function OccoAuthPlugin({ client }) {
   // Variant assignment:
   //   claude         → auto (copilot SDK ProviderTransform.variants())
   //   gemini         → no variants
-  //   gpt-5.1, gpt-5.2 (non-codex) → default(high) / low/medium/high/xhigh
+  //   gpt-5.1, gpt-5.2, gpt-5.4 (non-codex) → default(high) / low/medium/high/xhigh
   //   gpt-5.*-codex/codex-max → default(high) / high/xhigh only
   //   gpt-5-mini, gpt-5.1-codex-mini → no variants (mini = no reasoning)
   //   gpt-4o/4.1    → no variants (no reasoning)
@@ -252,6 +329,15 @@ export async function OccoAuthPlugin({ client }) {
       limit: { context: 400000, output: 128000 },
       variants: GPT_CODEX_VARIANTS,
     },
+    "gpt-5.4": {
+      name: "GPT-5.4",
+      reasoning: true,
+      tool_call: true,
+      temperature: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
+      limit: { context: 400000, output: 128000 },
+      variants: GPT_REASONING_VARIANTS_XHIGH,
+    },
     // --- Other models ---
     "grok-code-fast-1": {
       name: "Grok Code Fast 1",
@@ -277,7 +363,7 @@ export async function OccoAuthPlugin({ client }) {
     config: (config) => {
       config.provider = config.provider ?? {};
       config.provider.occo = {
-        name: "GitHub Copilot (OCCO)",
+        name: "OCCO",
         npm: "@ai-sdk/github-copilot",
         api: DEFAULT_API_URL,
         models: MODELS,
@@ -303,6 +389,9 @@ export async function OccoAuthPlugin({ client }) {
         const info = await getAuth();
         if (!info || info.type !== "oauth") return {};
 
+        // Proactive token refresh on plugin load
+        await refreshTokenIfNeeded(getAuth);
+
         // Persistent task ID for all requests in this session
         const sessionTaskId = crypto.randomUUID();
 
@@ -317,39 +406,8 @@ export async function OccoAuthPlugin({ client }) {
           baseURL: USE_TOKEN_ENDPOINT_API ? resolvedApiUrl : DEFAULT_API_URL,
           apiKey: "",
           async fetch(input, init) {
-            const info = await getAuth();
-            if (info.type !== "oauth") return fetch(input, init);
-
-            // Get or refresh the Copilot session token
-            if (!info.access || info.expires < Date.now()) {
-              const response = await fetch(TOKEN_URL, {
-                headers: {
-                  Accept: "application/json",
-                  Authorization: `Bearer ${info.refresh}`,
-                  ...HEADERS,
-                },
-              });
-              if (!response.ok) {
-                throw new Error(`Token refresh failed: ${response.status}`);
-              }
-              const tokenData = await response.json();
-
-              // Dynamically resolve API URL from token response (optional)
-              if (USE_TOKEN_ENDPOINT_API && tokenData.endpoints?.api) {
-                resolvedApiUrl = tokenData.endpoints.api;
-              }
-
-              await client.auth.set({
-                path: { id: "occo" },
-                body: {
-                  type: "oauth",
-                  refresh: info.refresh,
-                  access: tokenData.token,
-                  expires: tokenData.expires_at * 1000 - 5 * 60 * 1000,
-                },
-              });
-              info.access = tokenData.token;
-            }
+            const info = await refreshTokenIfNeeded(getAuth);
+            if (!info || info.type !== "oauth") return fetch(input, init);
 
             // Parse request body once for routing + detection
             let parsedBody = null;
@@ -420,7 +478,7 @@ export async function OccoAuthPlugin({ client }) {
       methods: [
         {
           type: "oauth",
-          label: "Login with GitHub Copilot (OCCO)",
+          label: "Login with OCCO",
           async authorize() {
             const deviceResponse = await fetch(
               "https://github.com/login/device/code",
