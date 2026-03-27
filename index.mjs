@@ -12,9 +12,9 @@ export async function OccoAuthPlugin({ client }) {
   const TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
   const POLLING_MARGIN_MS = 3000;
   const HEADERS = {
-    "User-Agent": "GitHubCopilotChat/0.37.9",
-    "Editor-Version": "vscode/1.109.1",
-    "Editor-Plugin-Version": "copilot-chat/0.37.9",
+    "User-Agent": "GitHubCopilotChat/0.38.9",
+    "Editor-Version": "vscode/1.110.1",
+    "Editor-Plugin-Version": "copilot-chat/0.38.9",
     "Copilot-Integration-Id": "vscode-chat",
     "X-GitHub-Api-Version": "2025-05-01",
   };
@@ -515,7 +515,7 @@ export async function OccoAuthPlugin({ client }) {
                 headers: {
                   Accept: "application/json",
                   "Content-Type": "application/json",
-                  "User-Agent": "GitHubCopilotChat/0.37.9",
+                  "User-Agent": "GitHubCopilotChat/0.38.9",
                 },
                 body: JSON.stringify({
                   client_id: CLIENT_ID,
@@ -548,7 +548,7 @@ export async function OccoAuthPlugin({ client }) {
                       headers: {
                         Accept: "application/json",
                         "Content-Type": "application/json",
-                        "User-Agent": "GitHubCopilotChat/0.37.9",
+                        "User-Agent": "GitHubCopilotChat/0.38.9",
                       },
                       body: JSON.stringify({
                         client_id: CLIENT_ID,
