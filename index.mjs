@@ -22,6 +22,9 @@ export async function OccoAuthPlugin({ client }) {
   // Resolved dynamically from token response's endpoints.api (unless legacy mode)
   let resolvedApiUrl = DEFAULT_API_URL;
 
+  // Cache session → interaction UUID mapping
+  const interactionIds = new Map();
+
   // ---------------------------------------------------------------------------
   // Token refresh helper — reused at loader init and per-request
   // ---------------------------------------------------------------------------
@@ -70,29 +73,23 @@ export async function OccoAuthPlugin({ client }) {
   // Variant definitions
   // ---------------------------------------------------------------------------
 
-  // Claude variants: matching v0.37.9 ChatCompletions path behavior.
-  // Official default: AnthropicThinkingBudget = 16000 (experiment config).
+  // Claude variants: thinking_budget via ChatCompletions path.
   // Cap: Math.min(32000, maxOutputTokens - 1, normalizedBudget).
-  // Most models: min(32000, output-1, 16000) = 16000.
-  // claude-sonnet-4 (output=16000): min(32000, 15999, 16000) = 15999.
-  const CLAUDE_VARIANTS = {
-    default: { thinking_budget: 16000 },
+  // Opus 4.5+: thinking enabled by default via model options, thinking/max variants available.
+  // Lower tiers (sonnet/haiku): thinking opt-in only via variant, no max.
+  const CLAUDE_OPUS_VARIANTS = {
     thinking: { thinking_budget: 16000 },
     max: { thinking_budget: 32000 },
   };
+  const CLAUDE_LOWER_VARIANTS = {
+    thinking: { thinking_budget: 16000 },
+  };
   const CLAUDE_SONNET4_VARIANTS = {
-    default: { thinking_budget: 15999 },
     thinking: { thinking_budget: 15999 },
-    max: { thinking_budget: 15999 },
   };
 
-  // GPT reasoning effort variants (for mini models): default=high
+  // GPT reasoning effort variants (for mini models): default=high (via SDK)
   const GPT_REASONING_VARIANTS = {
-    default: {
-      reasoningEffort: "high",
-      reasoningSummary: "auto",
-      include: ["reasoning.encrypted_content"],
-    },
     low: {
       reasoningEffort: "low",
       reasoningSummary: "auto",
@@ -120,13 +117,8 @@ export async function OccoAuthPlugin({ client }) {
     },
   };
 
-  // GPT Codex variants: only high (default) and xhigh
+  // GPT Codex variants: only high and xhigh
   const GPT_CODEX_VARIANTS = {
-    default: {
-      reasoningEffort: "high",
-      reasoningSummary: "auto",
-      include: ["reasoning.encrypted_content"],
-    },
     high: {
       reasoningEffort: "high",
       reasoningSummary: "auto",
@@ -144,8 +136,8 @@ export async function OccoAuthPlugin({ client }) {
   // Context = min(max_context_window_tokens, max_output_tokens + max_prompt_tokens).
   //
   // Variant assignment:
-  //   claude         → default(16000) / thinking(16000) / max(32000)
-  //                    claude-sonnet-4 uses 15999 (maxOutputTokens-1=15999)
+  //   claude-opus-4.5+ → thinking(16000) / max(32000)
+  //   claude-sonnet/haiku → thinking only (no max)
   //   gemini         → no variants
   //   gpt-5.1, gpt-5.2, gpt-5.4 (non-codex) → default(high) / low/medium/high/xhigh
   //   gpt-5.*-codex/codex-max → default(high) / high/xhigh only
@@ -164,7 +156,8 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 192000, output: 64000 },
-      variants: CLAUDE_VARIANTS,
+      options: { thinking_budget: 16000 },
+      variants: CLAUDE_OPUS_VARIANTS,
     },
     "claude-opus-4.6": {
       name: "Claude Opus 4.6",
@@ -173,7 +166,8 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 192000, output: 64000 },
-      variants: CLAUDE_VARIANTS,
+      options: { thinking_budget: 16000 },
+      variants: CLAUDE_OPUS_VARIANTS,
     },
     "claude-opus-4.5": {
       name: "Claude Opus 4.5",
@@ -182,7 +176,8 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
-      variants: CLAUDE_VARIANTS,
+      options: { thinking_budget: 16000 },
+      variants: CLAUDE_OPUS_VARIANTS,
     },
     "claude-sonnet-4.6": {
       name: "Claude Sonnet 4.6",
@@ -191,7 +186,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
-      variants: CLAUDE_VARIANTS,
+      variants: CLAUDE_LOWER_VARIANTS,
     },
     "claude-sonnet-4.5": {
       name: "Claude Sonnet 4.5",
@@ -200,7 +195,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
-      variants: CLAUDE_VARIANTS,
+      variants: CLAUDE_LOWER_VARIANTS,
     },
     "claude-sonnet-4": {
       name: "Claude Sonnet 4",
@@ -218,7 +213,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
-      variants: CLAUDE_VARIANTS,
+      variants: CLAUDE_LOWER_VARIANTS,
     },
     // --- Gemini models ---
     "gemini-2.5-pro": {
@@ -385,6 +380,11 @@ export async function OccoAuthPlugin({ client }) {
     // -------------------------------------------------------------------------
     "chat.headers": async (incoming, output) => {
       if (incoming.model.providerID !== "occo") return;
+      // Generate stable interaction UUID per session
+      if (!interactionIds.has(incoming.sessionID)) {
+        interactionIds.set(incoming.sessionID, crypto.randomUUID());
+      }
+      output.headers["x-interaction-id"] = interactionIds.get(incoming.sessionID);
       try {
         const session = await client.session.get({
           path: { id: incoming.sessionID },
@@ -481,7 +481,7 @@ export async function OccoAuthPlugin({ client }) {
             } catch {}
 
             const requestId = crypto.randomUUID();
-            const intent = "conversation-panel";
+            const intent = "conversation-agent";
             const headers = {
               ...init.headers,
               ...HEADERS,
