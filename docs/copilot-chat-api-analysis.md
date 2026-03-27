@@ -188,13 +188,13 @@ protected override async fetch(opts: ToolCallingLoopFetchOptions, token: Cancell
 
 **完整的 intent 分配矩阵：**
 
-| 场景 | requestKindOptions | X-Interaction-Type | X-Initiator |
-|------|-------------------|-------------------|-------------|
-| 普通对话（首次） | `undefined` | `conversation-agent`¹ | `user` |
-| 普通对话（tool follow-up） | `undefined` | `conversation-agent`¹ | `agent` |
-| Subagent（首次） | `{ kind: 'subagent' }` | `conversation-subagent` | `agent`² |
-| Subagent（tool follow-up） | `{ kind: 'subagent' }` | `conversation-subagent` | `agent`² |
-| Background（标题生成等） | `{ kind: 'background' }` | `conversation-background` | — |
+| 场景                       | requestKindOptions       | X-Interaction-Type        | X-Initiator |
+| -------------------------- | ------------------------ | ------------------------- | ----------- |
+| 普通对话（首次）           | `undefined`              | `conversation-agent`¹     | `user`      |
+| 普通对话（tool follow-up） | `undefined`              | `conversation-agent`¹     | `agent`     |
+| Subagent（首次）           | `{ kind: 'subagent' }`   | `conversation-subagent`   | `agent`²    |
+| Subagent（tool follow-up） | `{ kind: 'subagent' }`   | `conversation-subagent`   | `agent`²    |
+| Background（标题生成等）   | `{ kind: 'background' }` | `conversation-background` | —           |
 
 ¹ v0.37.x 无条件；v0.38.x 有条件（仅当 intent=conversation-agent 时设置）；v0.39.x+ 无条件回归
 ² subagent 的 `userInitiatedRequest` 始终为 false（因为 `subAgentInvocationId` 存在，见 §2.4 toolCallingLoop.ts 判断逻辑）
