@@ -12,9 +12,9 @@ export async function OccoAuthPlugin({ client }) {
   const TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
   const POLLING_MARGIN_MS = 3000;
   const HEADERS = {
-    "User-Agent": "GitHubCopilotChat/0.38.2",
-    "Editor-Version": "vscode/1.110.1",
-    "Editor-Plugin-Version": "copilot-chat/0.38.2",
+    "User-Agent": "GitHubCopilotChat/0.37.9",
+    "Editor-Version": "vscode/1.109.1",
+    "Editor-Plugin-Version": "copilot-chat/0.37.9",
     "Copilot-Integration-Id": "vscode-chat",
     "X-GitHub-Api-Version": "2025-05-01",
   };
@@ -70,20 +70,21 @@ export async function OccoAuthPlugin({ client }) {
   // Variant definitions
   // ---------------------------------------------------------------------------
 
-  // Claude variants: commented out, using copilot SDK auto-config via ProviderTransform.variants()
-  // const CLAUDE_OPUS_VARIANTS = {
-  //   default: { thinking_budget: 8000 },
-  //   thinking: { thinking_budget: 8000 },
-  //   max: { thinking_budget: 32000 },
-  // };
-  // const CLAUDE_SONNET_VARIANTS = {
-  //   thinking: { thinking_budget: 4000 },
-  //   max: { thinking_budget: 32000 },
-  // };
-  // const CLAUDE_HAIKU_VARIANTS = {
-  //   thinking: { thinking_budget: 2000 },
-  //   max: { thinking_budget: 32000 },
-  // };
+  // Claude variants: matching v0.37.9 ChatCompletions path behavior.
+  // Official default: AnthropicThinkingBudget = 16000 (experiment config).
+  // Cap: Math.min(32000, maxOutputTokens - 1, normalizedBudget).
+  // Most models: min(32000, output-1, 16000) = 16000.
+  // claude-sonnet-4 (output=16000): min(32000, 15999, 16000) = 15999.
+  const CLAUDE_VARIANTS = {
+    default: { thinking_budget: 16000 },
+    thinking: { thinking_budget: 16000 },
+    max: { thinking_budget: 32000 },
+  };
+  const CLAUDE_SONNET4_VARIANTS = {
+    default: { thinking_budget: 15999 },
+    thinking: { thinking_budget: 15999 },
+    max: { thinking_budget: 15999 },
+  };
 
   // GPT reasoning effort variants (for mini models): default=high
   const GPT_REASONING_VARIANTS = {
@@ -143,7 +144,8 @@ export async function OccoAuthPlugin({ client }) {
   // Context = min(max_context_window_tokens, max_output_tokens + max_prompt_tokens).
   //
   // Variant assignment:
-  //   claude         → auto (copilot SDK ProviderTransform.variants())
+  //   claude         → default(16000) / thinking(16000) / max(32000)
+  //                    claude-sonnet-4 uses 15999 (maxOutputTokens-1=15999)
   //   gemini         → no variants
   //   gpt-5.1, gpt-5.2, gpt-5.4 (non-codex) → default(high) / low/medium/high/xhigh
   //   gpt-5.*-codex/codex-max → default(high) / high/xhigh only
@@ -162,6 +164,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 192000, output: 64000 },
+      variants: CLAUDE_VARIANTS,
     },
     "claude-opus-4.6": {
       name: "Claude Opus 4.6",
@@ -170,6 +173,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 192000, output: 64000 },
+      variants: CLAUDE_VARIANTS,
     },
     "claude-opus-4.5": {
       name: "Claude Opus 4.5",
@@ -178,6 +182,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
+      variants: CLAUDE_VARIANTS,
     },
     "claude-sonnet-4.6": {
       name: "Claude Sonnet 4.6",
@@ -186,6 +191,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
+      variants: CLAUDE_VARIANTS,
     },
     "claude-sonnet-4.5": {
       name: "Claude Sonnet 4.5",
@@ -194,6 +200,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
+      variants: CLAUDE_VARIANTS,
     },
     "claude-sonnet-4": {
       name: "Claude Sonnet 4",
@@ -202,6 +209,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 144000, output: 16000 },
+      variants: CLAUDE_SONNET4_VARIANTS,
     },
     "claude-haiku-4.5": {
       name: "Claude Haiku 4.5",
@@ -210,6 +218,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 160000, output: 32000 },
+      variants: CLAUDE_VARIANTS,
     },
     // --- Gemini models ---
     "gemini-2.5-pro": {
@@ -382,6 +391,8 @@ export async function OccoAuthPlugin({ client }) {
         });
         if (session.data?.parentID) {
           output.headers["x-initiator"] = "agent";
+          output.headers["openai-intent"] = "conversation-agent";
+          output.headers["x-interaction-type"] = "conversation-agent";
         }
       } catch {}
     },
@@ -470,14 +481,15 @@ export async function OccoAuthPlugin({ client }) {
             } catch {}
 
             const requestId = crypto.randomUUID();
+            const intent = "conversation-panel";
             const headers = {
               ...init.headers,
               ...HEADERS,
               Authorization: `Bearer ${info.access}`,
-              "OpenAI-Intent": "conversation-panel",
+              "OpenAI-Intent": intent,
+              "X-Interaction-Type": intent,
               "X-Initiator": isAgent ? "agent" : "user",
               "X-Request-Id": requestId,
-              "X-Agent-Task-Id": requestId,
             };
             if (isVision) {
               headers["Copilot-Vision-Request"] = "true";
@@ -503,7 +515,7 @@ export async function OccoAuthPlugin({ client }) {
                 headers: {
                   Accept: "application/json",
                   "Content-Type": "application/json",
-                  "User-Agent": "GitHubCopilotChat/0.38.2",
+                  "User-Agent": "GitHubCopilotChat/0.37.9",
                 },
                 body: JSON.stringify({
                   client_id: CLIENT_ID,
@@ -536,7 +548,7 @@ export async function OccoAuthPlugin({ client }) {
                       headers: {
                         Accept: "application/json",
                         "Content-Type": "application/json",
-                        "User-Agent": "GitHubCopilotChat/0.38.2",
+                        "User-Agent": "GitHubCopilotChat/0.37.9",
                       },
                       body: JSON.stringify({
                         client_id: CLIENT_ID,
