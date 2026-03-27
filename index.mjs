@@ -490,6 +490,7 @@ export async function OccoAuthPlugin({ client }) {
               "X-Interaction-Type": intent,
               "X-Initiator": isAgent ? "agent" : "user",
               "X-Request-Id": requestId,
+              "X-Agent-Task-Id": requestId,
             };
             if (isVision) {
               headers["Copilot-Vision-Request"] = "true";
