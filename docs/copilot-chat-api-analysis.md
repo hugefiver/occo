@@ -1,7 +1,7 @@
 # VS Code Copilot Chat 官方插件 API 请求行为分析
 
 > 分析日期：2026-03-27
-> 对比版本：OCCO 模拟 v0.38.9 vs 官方 v0.36.0 ~ v0.42.x
+> 对比版本：OCCO 模拟 v0.38.2 vs 官方 v0.36.0 ~ v0.42.x
 > 源码仓库：microsoft/vscode-copilot-chat（MIT，2025年12月开源）
 
 ## 一、版本演进时间线
@@ -127,6 +127,8 @@ userInitiatedRequest: (iterationNumber === 0 &&
 
 含义：首次迭代 + 非续接 + 非子Agent调用 → user；工具调用后续轮次 → agent
 
+**subagent 的特殊行为**：由于 `subAgentInvocationId` 存在，subagent 的 `userInitiatedRequest` **始终为 false**，即 `X-Initiator` 永远是 `agent`。
+
 **langModelServer.ts（Messages API 代理路径）：**
 
 ```typescript
@@ -160,7 +162,52 @@ isAgent = last?.role !== "user" || userMessageCount > 1;
 | 子Agent调用            | agent       | conversation-subagent   |
 | 后台任务（标题生成等） | agent       | conversation-background |
 
-### 2.6 各版本 Header 存在性总结
+### 2.6 Subagent 请求传播机制
+
+`requestKindOptions` 决定 `X-Interaction-Type` 取值。关键问题：subagent 的后续请求（工具调用 follow-up）是否仍然使用 `conversation-subagent`？
+
+**答案：是，所有迭代都使用 `conversation-subagent`。**
+
+源码位于 `defaultIntentRequestHandler.ts` 的 `DefaultToolCallingLoop.fetch()`：
+
+```typescript
+protected override async fetch(opts: ToolCallingLoopFetchOptions, token: CancellationToken): Promise<ChatResponse> {
+    return this.options.invocation.endpoint.makeChatRequest2({
+        ...opts,
+        // ...
+        requestKindOptions: this.options.request.subAgentInvocationId
+            ? { kind: 'subagent' }
+            : undefined,
+    }, token);
+}
+```
+
+`this.options.request.subAgentInvocationId` 在 loop 创建时设置，不会改变。`fetch()` 每次迭代都会被调用，因此 subagent 的**所有请求**都携带 `{ kind: 'subagent' }`。
+
+同样，`searchSubagentToolCallingLoop.ts` 和 `executionSubagentToolCallingLoop.ts` 直接硬编码 `requestKindOptions: { kind: 'subagent' }`。
+
+**完整的 intent 分配矩阵：**
+
+| 场景 | requestKindOptions | X-Interaction-Type | X-Initiator |
+|------|-------------------|-------------------|-------------|
+| 普通对话（首次） | `undefined` | `conversation-agent`¹ | `user` |
+| 普通对话（tool follow-up） | `undefined` | `conversation-agent`¹ | `agent` |
+| Subagent（首次） | `{ kind: 'subagent' }` | `conversation-subagent` | `agent`² |
+| Subagent（tool follow-up） | `{ kind: 'subagent' }` | `conversation-subagent` | `agent`² |
+| Background（标题生成等） | `{ kind: 'background' }` | `conversation-background` | — |
+
+¹ v0.37.x 无条件；v0.38.x 有条件（仅当 intent=conversation-agent 时设置）；v0.39.x+ 无条件回归
+² subagent 的 `userInitiatedRequest` 始终为 false（因为 `subAgentInvocationId` 存在，见 §2.4 toolCallingLoop.ts 判断逻辑）
+
+**Subagent 的调用入口**（v0.38.0+ 新增）：
+
+- `searchSubagentTool.ts` — 搜索子Agent，创建 `SearchSubagentToolCallingLoop`
+- `executionSubagentTool.ts` — 执行子Agent，创建 `ExecutionSubagentToolCallingLoop`
+- 两者都生成独立的 `subAgentInvocationId`（UUID），用于 trajectory 追踪和父子关联
+
+**OCCO 对应**：OCCO `chat.headers` hook 中 `parentID` 存在时设置 `openai-intent: conversation-agent` 和 `x-interaction-type: conversation-agent`。严格来说应为 `conversation-subagent`，但由于计费行为由 `X-Initiator` 控制（已设为 `agent`），实际影响有限。
+
+### 2.7 各版本 Header 存在性总结
 
 | Header                 | v0.37.x   | v0.38.x HTTP | v0.38.x WS | v0.39.x+ HTTP | v0.39.x+ WS |
 | ---------------------- | --------- | ------------ | ---------- | ------------- | ----------- |
@@ -427,7 +474,7 @@ IChatModelMetadata.billing: {
 ### 5.3 OCCO 计费相关发现
 
 - v0.40.0 版本号 + 无 X-Initiator → 每个工具调用都被计为 premium → 快速消耗配额
-- v0.38.9 版本号 + X-Initiator: agent → 工具调用后续免费
+- v0.38.2 版本号 + X-Initiator: agent → 工具调用后续免费
 - 必须保留 X-Initiator 头，即使官方 v0.39.x+ HTTP 路径不再发送
 
 ## 六、OCCO 当前实现详情
@@ -436,9 +483,9 @@ IChatModelMetadata.billing: {
 
 ```javascript
 const HEADERS = {
-  "User-Agent": "GitHubCopilotChat/0.38.9",
+  "User-Agent": "GitHubCopilotChat/0.38.2",
   "Editor-Version": "vscode/1.110.1",
-  "Editor-Plugin-Version": "copilot-chat/0.38.9",
+  "Editor-Plugin-Version": "copilot-chat/0.38.2",
   "Copilot-Integration-Id": "vscode-chat",
   "X-GitHub-Api-Version": "2025-05-01",
 };
@@ -554,7 +601,7 @@ GPT_CODEX_VARIANTS: {
 
 - **原因**：服务端根据版本号判断客户端能力，不支持的版本返回 466
 - **chatMLFetcher.ts line 1546**：`ChatFailKind.ClientNotSupported`
-- **v0.37.9 版本号触发 466**：已确认，改为 v0.38.9 后解决
+- **v0.37.9 版本号触发 466**：已确认，改为 v0.38.2 后解决
 - **conversation-panel + thinking_budget**：Panel 模式下发送 thinking_budget 可能触发 466
 
 ### 8.2 计费异常（v0.40.0 版本号）
@@ -562,7 +609,7 @@ GPT_CODEX_VARIANTS: {
 - v0.40.0 HTTP 路径不含 X-Initiator
 - 当时 OCCO 使用 `conversation-subagent` 作为所有请求的 intent
 - 结果：每个工具调用都被计为 premium，快速消耗配额
-- 解决：回退到 v0.38.9 版本号 + 保留 X-Initiator
+- 解决：回退到 v0.38.2 版本号 + 保留 X-Initiator
 
 ### 8.3 Intent 变迁历史
 
@@ -572,7 +619,7 @@ GPT_CODEX_VARIANTS: {
 | 中期 (v0.38.2) | conversation-panel    | 466 错误 + 无法发送 thinking_budget |
 | v0.39 尝试     | conversation-subagent | 计费异常                            |
 | 回退           | conversation-panel    | 466                                 |
-| 当前 (v0.38.9) | conversation-agent    | ✅ 正常                             |
+| 当前 (v0.38.2) | conversation-agent    | ✅ 正常                             |
 
 ## 九、升级注意事项
 
@@ -732,6 +779,6 @@ if (experimentService.getConfig(ConfigKey.ResponsesApiPromptCacheKeyEnabled)) {
 | 2dffcb2 | 0.39.x   | conversation-subagent | 尝试升级，计费异常                    |
 | f25621e | 0.38.2   | conversation-panel    | 回退                                  |
 | d93a37d | 0.37.9   | conversation-agent    | 对齐 v0.37.9 行为                     |
-| 329fb48 | 0.38.9   | conversation-agent    | 修复 466 错误                         |
-| 93b0963 | 0.38.9   | conversation-agent    | 添加 X-Agent-Task-Id                  |
-| 0bd0e5d | 0.38.9   | conversation-agent    | 添加 X-Interaction-Id，修复变体默认值 |
+| 329fb48 | 0.38.2   | conversation-agent    | 修复 466 错误                         |
+| 93b0963 | 0.38.2   | conversation-agent    | 添加 X-Agent-Task-Id                  |
+| 0bd0e5d | 0.38.2   | conversation-agent    | 添加 X-Interaction-Id，修复变体默认值 |
