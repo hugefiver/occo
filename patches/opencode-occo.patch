@@ -1,8 +1,8 @@
 diff --git a/packages/opencode/src/bun/index.ts b/packages/opencode/src/bun/index.ts
-index e3bddcc..f84236a 100644
+index dbdf5a2bc..bf7ab2a72 100644
 --- a/packages/opencode/src/bun/index.ts
 +++ b/packages/opencode/src/bun/index.ts
-@@ -58,7 +58,10 @@ export namespace BunProc {
+@@ -54,7 +54,10 @@ export namespace BunProc {
      // Use lock to ensure only one install at a time
      using _ = await Lock.write("bun-install")
  
@@ -14,7 +14,7 @@ index e3bddcc..f84236a 100644
      const pkgjsonPath = path.join(Global.Path.cache, "package.json")
      const parsed = await Filesystem.readJson<{ dependencies: Record<string, string> }>(pkgjsonPath).catch(async () => {
        const result = { dependencies: {} as Record<string, string> }
-@@ -67,17 +70,35 @@ export namespace BunProc {
+@@ -63,12 +66,28 @@ export namespace BunProc {
      })
      if (!parsed.dependencies) parsed.dependencies = {} as Record<string, string>
      const dependencies = parsed.dependencies
@@ -24,9 +24,7 @@ index e3bddcc..f84236a 100644
 +    if (isGitHub) {
 +      const ghPath = pkg.replace("github:", "")
 +      // Check if we already have a cached entry for this github package
-+      const existingEntry = Object.entries(dependencies).find(
-+        ([_, v]) => typeof v === "string" && v.includes(ghPath),
-+      )
++      const existingEntry = Object.entries(dependencies).find(([_, v]) => typeof v === "string" && v.includes(ghPath))
 +      // Use the cached name, or fall back to the repo name (last segment of github:user/repo)
 +      modName = existingEntry?.[0] ?? ghPath.split("/").pop() ?? pkg
 +    }
@@ -38,22 +36,15 @@ index e3bddcc..f84236a 100644
  
      if (!modExists || !cachedVersion) {
        // continue to install
-     } else if (version !== "latest" && cachedVersion === version) {
-       return mod
      } else if (version === "latest") {
--      const isOutdated = await PackageRegistry.isOutdated(pkg, cachedVersion, Global.Path.cache)
 +      if (isGitHub) {
 +        // For github packages, no registry to check — use cached version
 +        return mod
 +      }
-+      const isOutdated = await PackageRegistry.isOutdated(modName, cachedVersion, Global.Path.cache)
-       if (!isOutdated) return mod
--      log.info("Cached version is outdated, proceeding with install", { pkg, cachedVersion })
-+      log.info("Cached version is outdated, proceeding with install", { pkg: modName, cachedVersion })
-     }
- 
-     // Build command arguments
-@@ -89,7 +110,8 @@ export namespace BunProc {
+       if (!online()) return mod
+       const stale = await PackageRegistry.isOutdated(pkg, cachedVersion, Global.Path.cache)
+       if (!stale) return mod
+@@ -86,7 +105,8 @@ export namespace BunProc {
        ...(proxied() || process.env.CI ? ["--no-cache"] : []),
        "--cwd",
        Global.Path.cache,
@@ -63,14 +54,16 @@ index e3bddcc..f84236a 100644
      ]
  
      // Let Bun handle registry resolution:
-@@ -112,6 +134,22 @@ export namespace BunProc {
+@@ -109,6 +129,24 @@ export namespace BunProc {
        )
      })
  
 +    // For github packages, re-resolve the actual module name after install
 +    // since Bun updates package.json with the real package name
 +    if (isGitHub) {
-+      const updatedParsed = await Filesystem.readJson<{ dependencies: Record<string, string> }>(pkgjsonPath).catch(() => null)
++      const updatedParsed = await Filesystem.readJson<{ dependencies: Record<string, string> }>(pkgjsonPath).catch(
++        () => null,
++      )
 +      if (updatedParsed?.dependencies) {
 +        const ghPath = pkg.replace("github:", "")
 +        const entry = Object.entries(updatedParsed.dependencies).find(
@@ -86,33 +79,80 @@ index e3bddcc..f84236a 100644
      // Resolve actual version from installed package when using "latest"
      // This ensures subsequent starts use the cached version until explicitly updated
      let resolvedVersion = version
-@@ -124,7 +162,7 @@ export namespace BunProc {
+@@ -121,7 +159,9 @@ export namespace BunProc {
        }
      }
  
 -    parsed.dependencies[pkg] = resolvedVersion
-+    parsed.dependencies[modName] = resolvedVersion
++    // For github packages, store the github specifier so Bun doesn't try to
++    // resolve the package name from npm on subsequent `bun add` calls
++    parsed.dependencies[modName] = isGitHub ? pkg : resolvedVersion
      await Filesystem.writeJson(pkgjsonPath, parsed)
      return mod
    }
+diff --git a/packages/opencode/src/plugin/copilot.ts b/packages/opencode/src/plugin/copilot.ts
+index 44c5289dd..d159a26c0 100644
+--- a/packages/opencode/src/plugin/copilot.ts
++++ b/packages/opencode/src/plugin/copilot.ts
+@@ -69,6 +69,11 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+             const { isVision, isAgent } = iife(() => {
+               try {
+                 const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body
++                const userMsgsCount = (body?.messages ?? body?.input ?? [])
++                  .map((x: { role?: string }) => (x?.role === "user" ? 1 : 0))
++                  .reduce((acc: number, x: number) => acc + x)
++                const notUser = userMsgsCount > 1
++                // const notUser = userMsgsCount % 10 !== 1
+ 
+                 // Completions API
+                 if (body?.messages && url.includes("completions")) {
+@@ -78,7 +83,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                       (msg: any) =>
+                         Array.isArray(msg.content) && msg.content.some((part: any) => part.type === "image_url"),
+                     ),
+-                    isAgent: last?.role !== "user",
++                    isAgent: last?.role !== "user" || notUser,
+                   }
+                 }
+ 
+@@ -90,7 +95,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                       (item: any) =>
+                         Array.isArray(item?.content) && item.content.some((part: any) => part.type === "input_image"),
+                     ),
+-                    isAgent: last?.role !== "user",
++                    isAgent: last?.role !== "user" || notUser,
+                   }
+                 }
+ 
+@@ -112,7 +117,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                               part.content.some((nested: any) => nested?.type === "image")),
+                         ),
+                     ),
+-                    isAgent: !(last?.role === "user" && hasNonToolCalls),
++                    isAgent: !(last?.role === "user" && hasNonToolCalls) || notUser,
+                   }
+                 }
+               } catch {}
 diff --git a/packages/opencode/src/provider/error.ts b/packages/opencode/src/provider/error.ts
-index 0db0357..0c7882f 100644
+index 52e525177..1065cdf66 100644
 --- a/packages/opencode/src/provider/error.ts
 +++ b/packages/opencode/src/provider/error.ts
-@@ -40,7 +40,7 @@ export namespace ProviderError {
+@@ -47,6 +47,10 @@ export namespace ProviderError {
    }
  
-   function error(providerID: string, error: APICallError) {
--    if (providerID.includes("github-copilot") && error.statusCode === 403) {
-+    if ((providerID.includes("github-copilot") || providerID === "occo") && error.statusCode === 403) {
-       return "Please reauthenticate with the copilot provider to ensure your credentials work properly with OpenCode."
-     }
- 
+   function message(providerID: ProviderID, e: APICallError) {
++    if ((providerID.includes("github-copilot") || providerID === "occo") && e.statusCode === 403) {
++      return "Please reauthenticate with the copilot provider to ensure your credentials work properly with OpenCode."
++    }
++
+     return iife(() => {
+       const msg = e.message
+       if (msg === "") {
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index 022ec31..de7d0aa 100644
+index 7fb316628..3990c56ef 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -169,6 +169,16 @@ export namespace Provider {
+@@ -204,6 +204,16 @@ export namespace Provider {
          options: {},
        }
      },
@@ -126,29 +166,26 @@ index 022ec31..de7d0aa 100644
 +        options: {},
 +      }
 +    },
-     "github-copilot-enterprise": async () => {
+     "github-copilot": async () => {
        return {
          autoload: false,
-@@ -964,7 +974,17 @@ export namespace Provider {
+@@ -1110,7 +1120,14 @@ export namespace Provider {
        if (disabled.has(providerID)) continue
        const data = database[providerID]
        if (!data) {
 -        log.error("Provider does not exist in model list " + providerID)
-+        // Plugin-injected providers (e.g. "occo") won't exist in models.dev database
-+        // but still need their custom loader registered for correct API routing
-+        const configData = configProviders.find(([id]) => id === providerID)
-+        if (!configData) {
-+          log.error("Provider does not exist in model list " + providerID)
-+          continue
-+        }
++        if (!providers[providerID]) continue
 +        const result = await fn({ id: providerID, env: [], models: {} } as any)
 +        if (result) {
 +          if (result.getModel) modelLoaders[providerID] = result.getModel
++          if (result.options) {
++            providers[providerID] = mergeDeep(providers[providerID], { options: result.options })
++          }
 +        }
          continue
        }
        const result = await fn(data)
-@@ -1231,7 +1251,7 @@ export namespace Provider {
+@@ -1443,7 +1460,7 @@ export namespace Provider {
        if (providerID.startsWith("opencode")) {
          priority = ["gpt-5-nano"]
        }
@@ -158,15 +195,15 @@ index 022ec31..de7d0aa 100644
          priority = ["gpt-5-mini", "claude-haiku-4.5", ...priority]
        }
 diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
-index 4e42fb0..fa5fb4c 100644
+index f5717da55..2560aa6b8 100644
 --- a/packages/opencode/src/session/llm.ts
 +++ b/packages/opencode/src/session/llm.ts
-@@ -145,7 +145,7 @@ export namespace LLM {
+@@ -203,7 +203,7 @@ export namespace LLM {
      )
  
      const maxOutputTokens =
--      isCodex || provider.id.includes("github-copilot") ? undefined : ProviderTransform.maxOutputTokens(input.model)
-+      isCodex || provider.id.includes("github-copilot") || provider.id === "occo" ? undefined : ProviderTransform.maxOutputTokens(input.model)
- 
-     const tools = await resolveTools(input)
+-      isOpenaiOauth || provider.id.includes("github-copilot")
++      isOpenaiOauth || provider.id.includes("github-copilot") || provider.id === "occo"
+         ? undefined
+         : ProviderTransform.maxOutputTokens(input.model)
  
