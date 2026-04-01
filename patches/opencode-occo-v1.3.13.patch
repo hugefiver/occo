@@ -1,5 +1,5 @@
 diff --git a/packages/opencode/src/bun/index.ts b/packages/opencode/src/bun/index.ts
-index 589414a02..23c96356f 100644
+index 589414a02..71b069d78 100644
 --- a/packages/opencode/src/bun/index.ts
 +++ b/packages/opencode/src/bun/index.ts
 @@ -54,7 +54,10 @@ export namespace BunProc {
@@ -14,7 +14,7 @@ index 589414a02..23c96356f 100644
      const pkgjsonPath = path.join(Global.Path.cache, "package.json")
      const parsed = await Filesystem.readJson<{ dependencies: Record<string, string> }>(pkgjsonPath).catch(async () => {
        const result = { dependencies: {} as Record<string, string> }
-@@ -63,12 +66,28 @@ export namespace BunProc {
+@@ -63,11 +66,27 @@ export namespace BunProc {
      })
      if (!parsed.dependencies) parsed.dependencies = {} as Record<string, string>
      const dependencies = parsed.dependencies
@@ -22,7 +22,8 @@ index 589414a02..23c96356f 100644
 +    // Resolve the actual module name for path construction and cache lookup
 +    let modName = pkg
 +    if (isGitHub) {
-+      const ghPath = pkg.replace("github:", "")
++      // Strip #ref (branch/tag/commit) from the github path for name matching
++      const ghPath = pkg.replace("github:", "").split("#")[0]
 +      // Check if we already have a cached entry for this github package
 +      const existingEntry = Object.entries(dependencies).find(([_, v]) => typeof v === "string" && v.includes(ghPath))
 +      // Use the cached name, or fall back to the repo name (last segment of github:user/repo)
@@ -36,21 +37,19 @@ index 589414a02..23c96356f 100644
  
      if (!modExists || !cachedVersion) {
        // continue to install
++    } else if (isGitHub) {
++      // Reinstall only if specifier changed (e.g. different branch/tag/commit)
++      if (cachedVersion === pkg) return mod
      } else if (version === "latest") {
-+      if (isGitHub) {
-+        // For github packages, no registry to check — use cached version
-+        return mod
-+      }
        if (!online()) return mod
        const stale = await PackageRegistry.isOutdated(pkg, cachedVersion, Global.Path.cache)
-       if (!stale) return mod
 @@ -87,7 +106,8 @@ export namespace BunProc {
        ...(proxied() || process.env.CI ? ["--no-cache"] : []),
        "--cwd",
        Global.Path.cache,
 -      pkg + "@" + version,
-+      // For github: specifiers, don't append @version (Bun uses #ref syntax for git refs)
-+      isGitHub && version === "latest" ? pkg : `${pkg}@${version}`,
++      // Bun uses github:user/repo#ref syntax; don't append @version
++      isGitHub ? (version === "latest" || pkg.includes("#") ? pkg : `${pkg}#${version}`) : `${pkg}@${version}`,
      ]
  
      // Let Bun handle registry resolution:
@@ -65,7 +64,7 @@ index 589414a02..23c96356f 100644
 +        () => null,
 +      )
 +      if (updatedParsed?.dependencies) {
-+        const ghPath = pkg.replace("github:", "")
++        const ghPath = pkg.replace("github:", "").split("#")[0]
 +        const entry = Object.entries(updatedParsed.dependencies).find(
 +          ([_, v]) => typeof v === "string" && v.includes(ghPath),
 +        )
@@ -91,7 +90,7 @@ index 589414a02..23c96356f 100644
      return mod
    }
 diff --git a/packages/opencode/src/plugin/copilot.ts b/packages/opencode/src/plugin/copilot.ts
-index 44c5289dd..d159a26c0 100644
+index 44c5289dd..136a93aec 100644
 --- a/packages/opencode/src/plugin/copilot.ts
 +++ b/packages/opencode/src/plugin/copilot.ts
 @@ -69,6 +69,11 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
@@ -100,7 +99,7 @@ index 44c5289dd..d159a26c0 100644
                  const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body
 +                const userMsgsCount = (body?.messages ?? body?.input ?? [])
 +                  .map((x: { role?: string }) => (x?.role === "user" ? 1 : 0))
-+                  .reduce((acc: number, x: number) => acc + x)
++                  .reduce((acc: number, x: number) => acc + x, 0)
 +                const notUser = userMsgsCount > 1
 +                // const notUser = userMsgsCount % 10 !== 1
  
