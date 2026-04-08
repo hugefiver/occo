@@ -378,13 +378,23 @@ export async function OccoAuthPlugin({ client }) {
     // Subagent quota protection: mark subagent sessions with x-initiator header
     // so they don't consume user's Copilot quota
     // -------------------------------------------------------------------------
+    "chat.params": async (incoming, output) => {
+      if (incoming.model.providerID !== "occo") return;
+      // Match github copilot cli, omit maxOutputTokens for gpt models
+      if (incoming.model.api.id.includes("gpt")) {
+        output.maxOutputTokens = undefined;
+      }
+    },
+
     "chat.headers": async (incoming, output) => {
       if (incoming.model.providerID !== "occo") return;
       // Generate stable interaction UUID per session
       if (!interactionIds.has(incoming.sessionID)) {
         interactionIds.set(incoming.sessionID, crypto.randomUUID());
       }
-      output.headers["x-interaction-id"] = interactionIds.get(incoming.sessionID);
+      output.headers["x-interaction-id"] = interactionIds.get(
+        incoming.sessionID,
+      );
       try {
         const session = await client.session.get({
           path: { id: incoming.sessionID },
@@ -451,7 +461,8 @@ export async function OccoAuthPlugin({ client }) {
             try {
               // Completions API: body.messages
               if (parsedBody?.messages) {
-                const last = parsedBody.messages[parsedBody.messages.length - 1];
+                const last =
+                  parsedBody.messages[parsedBody.messages.length - 1];
                 isAgent =
                   last?.role !== "user" ||
                   (parsedBody?.messages)

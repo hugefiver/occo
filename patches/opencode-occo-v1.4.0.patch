@@ -1,0 +1,117 @@
+diff --git a/packages/opencode/src/npm/index.ts b/packages/opencode/src/npm/index.ts
+index 3568ff20e..a366777af 100644
+--- a/packages/opencode/src/npm/index.ts
++++ b/packages/opencode/src/npm/index.ts
+@@ -3,12 +3,25 @@ import z from "zod"
+ import { NamedError } from "@opencode-ai/util/error"
+ import { Global } from "../global"
+ import { Log } from "../util/log"
++import { which } from "../util/which"
+ import path from "path"
+ import { readdir, rm } from "fs/promises"
+ import { Filesystem } from "@/util/filesystem"
+ import { Flock } from "@/util/flock"
+ import { Arborist } from "@npmcli/arborist"
+ 
++// Windows + Bun: process.env.PATH may be undefined (case-sensitive key lookup)
++// while process.env.Path holds the actual value. Normalize so npm ecosystem tools
++// like @npmcli/arborist can find git via which.sync("git").
++if (process.platform === "win32") {
++  if (!process.env.PATH) process.env.PATH = process.env.Path ?? ""
++  const git = which("git")
++  if (git) {
++    const dir = path.dirname(git)
++    if (!process.env.PATH.split(path.delimiter).includes(dir)) process.env.PATH += path.delimiter + dir
++  }
++}
++
+ export namespace Npm {
+   const log = Log.create({ service: "npm" })
+   const illegal = process.platform === "win32" ? new Set(["<", ">", ":", '"', "|", "?", "*"]) : undefined
+diff --git a/packages/opencode/src/plugin/github-copilot/copilot.ts b/packages/opencode/src/plugin/github-copilot/copilot.ts
+index c0425b7ef..f40816c86 100644
+--- a/packages/opencode/src/plugin/github-copilot/copilot.ts
++++ b/packages/opencode/src/plugin/github-copilot/copilot.ts
+@@ -79,6 +79,11 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+             const { isVision, isAgent } = iife(() => {
+               try {
+                 const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body
++                const userMsgsCount = (body?.messages ?? body?.input ?? [])
++                  .map((x: { role?: string }) => (x?.role === "user" ? 1 : 0))
++                  .reduce((acc: number, x: number) => acc + x, 0)
++                const notUser = userMsgsCount > 1
++                // const notUser = userMsgsCount % 10 !== 1
+ 
+                 // Completions API
+                 if (body?.messages && url.includes("completions")) {
+@@ -88,7 +93,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                       (msg: any) =>
+                         Array.isArray(msg.content) && msg.content.some((part: any) => part.type === "image_url"),
+                     ),
+-                    isAgent: last?.role !== "user",
++                    isAgent: last?.role !== "user" || notUser,
+                   }
+                 }
+ 
+@@ -100,7 +105,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                       (item: any) =>
+                         Array.isArray(item?.content) && item.content.some((part: any) => part.type === "input_image"),
+                     ),
+-                    isAgent: last?.role !== "user",
++                    isAgent: last?.role !== "user" || notUser,
+                   }
+                 }
+ 
+@@ -122,7 +127,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                               part.content.some((nested: any) => nested?.type === "image")),
+                         ),
+                     ),
+-                    isAgent: !(last?.role === "user" && hasNonToolCalls),
++                    isAgent: !(last?.role === "user" && hasNonToolCalls) || notUser,
+                   }
+                 }
+               } catch {}
+diff --git a/packages/opencode/src/provider/error.ts b/packages/opencode/src/provider/error.ts
+index 52e525177..1065cdf66 100644
+--- a/packages/opencode/src/provider/error.ts
++++ b/packages/opencode/src/provider/error.ts
+@@ -47,6 +47,10 @@ export namespace ProviderError {
+   }
+ 
+   function message(providerID: ProviderID, e: APICallError) {
++    if ((providerID.includes("github-copilot") || providerID === "occo") && e.statusCode === 403) {
++      return "Please reauthenticate with the copilot provider to ensure your credentials work properly with OpenCode."
++    }
++
+     return iife(() => {
+       const msg = e.message
+       if (msg === "") {
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 9ca49bf8f..bc2e61ca8 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -219,6 +219,15 @@ export namespace Provider {
+           },
+           options: {},
+         }),
++      occo: () =>
++        Effect.succeed({
++          autoload: true,
++          async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
++            if (useLanguageModel(sdk)) return sdk.languageModel(modelID)
++            return shouldUseCopilotResponsesApi(modelID) ? sdk.responses(modelID) : sdk.chat(modelID)
++          },
++          options: {},
++        }),
+       "github-copilot": () =>
+         Effect.succeed({
+           autoload: false,
+@@ -1568,7 +1577,7 @@ export namespace Provider {
+         if (providerID.startsWith("opencode")) {
+           priority = ["gpt-5-nano"]
+         }
+-        if (providerID.startsWith("github-copilot")) {
++        if (providerID.startsWith("github-copilot") || providerID === "occo") {
+           priority = ["gpt-5-mini", "claude-haiku-4.5", ...priority]
+         }
+         for (const item of priority) {
