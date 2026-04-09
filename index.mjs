@@ -491,6 +491,13 @@ export async function OccoAuthPlugin({ client }) {
               }
             } catch {}
 
+            // Fallback: if chat.headers already marked this as agent
+            // (via parentID subagent detection), trust that signal.
+            const initHeaders = init?.headers ?? {};
+            if (initHeaders["x-initiator"] === "agent") {
+              isAgent = true;
+            }
+
             const requestId = crypto.randomUUID();
             const intent = "conversation-agent";
             const headers = {
@@ -510,6 +517,9 @@ export async function OccoAuthPlugin({ client }) {
             // Remove conflicting auth headers from SDK
             delete headers["x-api-key"];
             delete headers["authorization"];
+            // Remove lowercase x-initiator from SDK's init.headers to prevent
+            // case-mismatch duplicate with our title-case X-Initiator above
+            delete headers["x-initiator"];
 
             return fetch(url, { ...init, headers });
           },
