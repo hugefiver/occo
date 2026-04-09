@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     opencode-upstream = {
-      url = "github:anomalyco/opencode/v1.3.17";
+      url = "github:anomalyco/opencode/v1.4.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -29,11 +29,20 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          # Patched opencode: upstream build + our occo patches
-          opencode = opencode-upstream.packages.${system}.opencode.overrideAttrs (old: {
-            pname = "opencode-occo";
-            patches = (old.patches or [ ]) ++ [ ./patches/opencode-occo-v1.3.17.patch ];
-          });
+          # Rebuild node_modules with correct hash (upstream hashes.json can go stale)
+          node_modules = opencode-upstream.packages.${system}.opencode.node_modules.override {
+            hash = "sha256-85wpU1oCWbthPleNIOj5d5AOuuYZ6rM7gMLZR6YJ2WU=";
+          };
+
+          # Patched opencode: upstream build + our occo patches + fixed node_modules
+          opencode =
+            (opencode-upstream.packages.${system}.opencode.override {
+              inherit node_modules;
+            }).overrideAttrs
+              (old: {
+                pname = "opencode-occo";
+                patches = (old.patches or [ ]) ++ [ ./patches/opencode-occo-v1.4.0.patch ];
+              });
 
           # Plugin derivations
           dcp = pkgs.callPackage ./nix/plugins/dcp.nix { };
