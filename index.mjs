@@ -77,14 +77,26 @@ export async function OccoAuthPlugin({ client }) {
   // Cap: Math.min(32000, maxOutputTokens - 1, normalizedBudget).
   // Opus 4.5+: thinking enabled by default via model options, thinking/max variants available.
   // Lower tiers (sonnet/haiku): thinking opt-in only via variant, no max.
+  //
+  // SDK auto-generates low/medium/high reasoningEffort variants for Claude
+  // models on @ai-sdk/github-copilot. Disable them so only our custom
+  // thinking_budget variants are exposed.
+  const DISABLED_SDK_VARIANTS = {
+    low: { disabled: true },
+    medium: { disabled: true },
+    high: { disabled: true },
+  };
   const CLAUDE_OPUS_VARIANTS = {
+    ...DISABLED_SDK_VARIANTS,
     thinking: { thinking_budget: 16000 },
     max: { thinking_budget: 32000 },
   };
   const CLAUDE_LOWER_VARIANTS = {
+    ...DISABLED_SDK_VARIANTS,
     thinking: { thinking_budget: 16000 },
   };
   const CLAUDE_SONNET4_VARIANTS = {
+    ...DISABLED_SDK_VARIANTS,
     thinking: { thinking_budget: 15999 },
   };
 
