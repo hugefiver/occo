@@ -22,6 +22,23 @@ export async function OccoAuthPlugin({ client }) {
   // Resolved dynamically from token response's endpoints.api (unless legacy mode)
   let resolvedApiUrl = DEFAULT_API_URL;
 
+  // Synthetic image-attachment messages (from tool results) should not count
+  // as real user turns for quota purposes.
+  const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:";
+
+  function imgMsg(msg) {
+    if (msg?.role !== "user") return false;
+    const content = msg.content;
+    if (typeof content === "string")
+      return content === SYNTHETIC_ATTACHMENT_PROMPT;
+    if (!Array.isArray(content)) return false;
+    return content.some(
+      (part) =>
+        (part?.type === "text" || part?.type === "input_text") &&
+        part.text === SYNTHETIC_ATTACHMENT_PROMPT,
+    );
+  }
+
   // Cache session → interaction UUID mapping
   const interactionIds = new Map();
 
@@ -157,20 +174,21 @@ export async function OccoAuthPlugin({ client }) {
   //   gpt-4o/4.1    → no variants (no reasoning)
   //   grok           → no variants
   //   oswe/raptor    → no variants (mini = no reasoning)
-  // ---------------------------------------------------------------------------
-
+  //
   const MODELS = {
     // --- Claude models ---
-    "claude-opus-4.6-fast": {
-      name: "Claude Opus 4.6 (fast mode)",
-      reasoning: true,
-      tool_call: true,
-      temperature: true,
-      modalities: { input: ["text", "image"], output: ["text"] },
-      limit: { context: 192000, output: 64000 },
-      options: { thinking_budget: 16000 },
-      variants: CLAUDE_OPUS_VARIANTS,
-    },
+
+    // removed from Copilot Pro+ plan
+    // "claude-opus-4.6-fast": {
+    //   name: "Claude Opus 4.6 (fast mode)",
+    //   reasoning: true,
+    //   tool_call: true,
+    //   temperature: true,
+    //   modalities: { input: ["text", "image"], output: ["text"] },
+    //   limit: { context: 192000, output: 64000 },
+    //   options: { thinking_budget: 16000 },
+    //   variants: CLAUDE_OPUS_VARIANTS,
+    // },
     "claude-opus-4.6": {
       name: "Claude Opus 4.6",
       reasoning: true,
@@ -429,7 +447,89 @@ export async function OccoAuthPlugin({ client }) {
         if (!info || info.type !== "oauth") return {};
 
         // Proactive token refresh on plugin load
-        await refreshTokenIfNeeded(getAuth);
+        const refreshedInfo = await refreshTokenIfNeeded(getAuth);
+
+        // Fetch remote model capabilities (non-fatal)
+        const remoteMap = {};
+        if (refreshedInfo?.access) {
+          try {
+            const modelsResp = await fetch(`${resolvedApiUrl}/models`, {
+              headers: {
+                Authorization: `Bearer ${refreshedInfo.access}`,
+                ...HEADERS,
+              },
+            });
+            if (modelsResp.ok) {
+              const data = await modelsResp.json();
+              for (const r of Array.isArray(data)
+                ? data
+                : data?.data || []) {
+                if (r?.id) remoteMap[r.id] = r;
+              }
+            }
+          } catch {}
+        }
+
+        // Tag models that support Anthropic Messages API.
+        // Priority: options.messagesApi > remote supported_endpoints
+        if (provider?.models) {
+          for (const [id, model] of Object.entries(provider.models)) {
+            const remote = remoteMap[id];
+            const supports = remote?.capabilities?.supports;
+            const useMessages =
+              model.options?.messagesApi ??
+              remote?.supported_endpoints?.includes("/v1/messages");
+
+            if (!useMessages) continue;
+
+            const isAdaptive =
+              model.options?.adaptiveThinking ??
+              (supports?.adaptive_thinking === true);
+            const maxBudget = supports?.max_thinking_budget;
+
+            model.api = {
+              npm: "@ai-sdk/anthropic",
+              url: `${resolvedApiUrl}/v1`,
+            };
+
+            // Clean up user override flags + copilot-format from options
+            if (!model.options) model.options = {};
+            delete model.options.messagesApi;
+            delete model.options.adaptiveThinking;
+            delete model.options.thinking_budget;
+
+            // Set default thinking config only when user hasn't overridden
+            if (isAdaptive) {
+              model.options.thinking ??= { type: "adaptive" };
+              model.options.effort ??= "high";
+            } else if (maxBudget) {
+              model.options.thinking ??= {
+                type: "enabled",
+                budgetTokens: Math.min(16000, maxBudget),
+              };
+            }
+
+            // Convert thinking_budget variants to anthropic SDK format;
+            // drop disabled variants (SDK-generated low/medium/high no longer needed)
+            if (model.variants) {
+              const converted = {};
+              for (const [name, opts] of Object.entries(model.variants)) {
+                if (opts.disabled) continue;
+                if (opts.thinking_budget != null) {
+                  converted[name] = {
+                    thinking: {
+                      type: "enabled",
+                      budgetTokens: opts.thinking_budget,
+                    },
+                  };
+                } else {
+                  converted[name] = opts;
+                }
+              }
+              model.variants = converted;
+            }
+          }
+        }
 
         // Zero out costs (Copilot is free)
         if (provider?.models) {
@@ -439,7 +539,6 @@ export async function OccoAuthPlugin({ client }) {
         }
 
         return {
-          baseURL: USE_TOKEN_ENDPOINT_API ? resolvedApiUrl : DEFAULT_API_URL,
           apiKey: "",
           async fetch(input, init) {
             const info = await refreshTokenIfNeeded(getAuth);
@@ -466,49 +565,47 @@ export async function OccoAuthPlugin({ client }) {
               url = url.replace(DEFAULT_API_URL, resolvedApiUrl);
             }
 
-            // Detect agent calls and vision requests
-            // All Copilot models (including Claude) use OpenAI-compatible format
-            let isAgent = true;
-            let isVision = false;
-            try {
-              // Completions API: body.messages
-              if (parsedBody?.messages) {
-                const last =
-                  parsedBody.messages[parsedBody.messages.length - 1];
-                isAgent =
-                  last?.role !== "user" ||
-                  (parsedBody?.messages)
-                    .map((x) => (x?.role === "user" ? 1 : 0))
-                    .reduce((acc, x) => acc + x) > 1;
-                isVision = parsedBody.messages.some(
-                  (msg) =>
-                    Array.isArray(msg.content) &&
-                    msg.content.some((part) => part.type === "image_url"),
-                );
-              }
-
-              // Responses API: body.input
-              if (parsedBody?.input) {
-                const last = parsedBody.input[parsedBody.input.length - 1];
-                isAgent =
-                  last?.role !== "user" ||
-                  (parsedBody?.input)
-                    .map((x) => (x?.role === "user" ? 1 : 0))
-                    .reduce((acc, x) => acc + x) > 1;
-                isVision = parsedBody.input.some(
-                  (item) =>
-                    Array.isArray(item?.content) &&
-                    item.content.some((part) => part.type === "input_image"),
-                );
-              }
-            } catch {}
-
-            // Fallback: if chat.headers already marked this as agent
-            // (via parentID subagent detection), trust that signal.
-            const initHeaders = init?.headers ?? {};
-            if (initHeaders["x-initiator"] === "agent") {
-              isAgent = true;
+            function detect(msgs, visionType, isMessagesApi) {
+              const last = msgs[msgs.length - 1];
+              const userCount = msgs.filter((x) => x?.role === "user").length;
+              const isAgent = isMessagesApi
+                ? !(
+                    last?.role === "user" &&
+                    Array.isArray(last?.content) &&
+                    last.content.some((p) => p?.type !== "tool_result")
+                  ) ||
+                  imgMsg(last) ||
+                  userCount !== 1
+                : last?.role !== "user" || imgMsg(last) || userCount !== 1;
+              const isVision = msgs.some(
+                (msg) =>
+                  Array.isArray(msg.content) &&
+                  msg.content.some(
+                    (part) =>
+                      part.type === visionType ||
+                      (part.type === "tool_result" &&
+                        Array.isArray(part.content) &&
+                        part.content.some((n) => n?.type === visionType)),
+                  ),
+              );
+              return { isAgent, isVision };
             }
+
+            // Detect agent calls and vision requests
+            const { isAgent: bodyIsAgent, isVision } = (() => {
+              try {
+                if (parsedBody?.messages && url.includes("completions"))
+                  return detect(parsedBody.messages, "image_url");
+                if (parsedBody?.input)
+                  return detect(parsedBody.input, "input_image");
+                if (parsedBody?.messages)
+                  return detect(parsedBody.messages, "image", true);
+              } catch {}
+              return { isAgent: true, isVision: false };
+            })();
+            const initHeaders = init?.headers ?? {};
+            const isAgent =
+              bodyIsAgent || initHeaders["x-initiator"] === "agent";
 
             const requestId = crypto.randomUUID();
             const intent = "conversation-agent";
@@ -524,6 +621,28 @@ export async function OccoAuthPlugin({ client }) {
             };
             if (isVision) {
               headers["Copilot-Vision-Request"] = "true";
+            }
+
+            // Add anthropic-beta headers for Messages API
+            if (url.includes("/v1/messages")) {
+              const betas = [
+                "context-management-2025-06-27",
+                "advanced-tool-use-2025-11-20",
+              ];
+              // Interleaved thinking only for non-adaptive thinking
+              // (adaptive handles it natively; absent = user disabled)
+              if (parsedBody?.thinking?.type === "enabled") {
+                betas.unshift("interleaved-thinking-2025-05-14");
+              }
+              const existing = headers["anthropic-beta"];
+              headers["anthropic-beta"] = existing
+                ? [
+                    ...new Set([
+                      ...existing.split(",").map((s) => s.trim()),
+                      ...betas,
+                    ]),
+                  ].join(",")
+                : betas.join(",");
             }
 
             // Remove conflicting auth headers from SDK
