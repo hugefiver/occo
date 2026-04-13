@@ -22,6 +22,19 @@ export async function OccoAuthPlugin({ client }) {
   // Resolved dynamically from token response's endpoints.api (unless legacy mode)
   let resolvedApiUrl = DEFAULT_API_URL;
 
+  // Fallback: models known to support /v1/messages (used when /models API fails)
+  const MESSAGES_API_MODELS = new Set([
+    "claude-opus-4.6",
+    "claude-opus-4.5",
+    "claude-sonnet-4.6",
+    "claude-sonnet-4.5",
+    "claude-sonnet-4",
+    "claude-haiku-4.5",
+  ]);
+
+  // Cached /models API response (refreshed each auth.loader call)
+  let cachedRemoteMap = {};
+
   // Synthetic image-attachment messages (from tool results) should not count
   // as real user turns for quota purposes.
   const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:";
@@ -449,8 +462,7 @@ export async function OccoAuthPlugin({ client }) {
         // Proactive token refresh on plugin load
         const refreshedInfo = await refreshTokenIfNeeded(getAuth);
 
-        // Fetch remote model capabilities (non-fatal)
-        const remoteMap = {};
+        // Fetch remote model capabilities (updates cache; non-fatal)
         if (refreshedInfo?.access) {
           try {
             const modelsResp = await fetch(`${resolvedApiUrl}/models`, {
@@ -461,24 +473,27 @@ export async function OccoAuthPlugin({ client }) {
             });
             if (modelsResp.ok) {
               const data = await modelsResp.json();
+              const map = {};
               for (const r of Array.isArray(data)
                 ? data
                 : data?.data || []) {
-                if (r?.id) remoteMap[r.id] = r;
+                if (r?.id) map[r.id] = r;
               }
+              cachedRemoteMap = map;
             }
           } catch {}
         }
 
         // Tag models that support Anthropic Messages API.
-        // Priority: options.messagesApi > remote supported_endpoints
+        // Priority: options.messagesApi > remote supported_endpoints > fallback list
         if (provider?.models) {
           for (const [id, model] of Object.entries(provider.models)) {
-            const remote = remoteMap[id];
+            const remote = cachedRemoteMap[id];
             const supports = remote?.capabilities?.supports;
             const useMessages =
               model.options?.messagesApi ??
-              remote?.supported_endpoints?.includes("/v1/messages");
+              remote?.supported_endpoints?.includes("/v1/messages") ??
+              MESSAGES_API_MODELS.has(id);
 
             if (!useMessages) continue;
 
@@ -506,6 +521,20 @@ export async function OccoAuthPlugin({ client }) {
               model.options.thinking ??= {
                 type: "enabled",
                 budgetTokens: Math.min(16000, maxBudget),
+              };
+            }
+
+            // Server-side context editing: prune stale tool results and
+            // old thinking blocks to keep long conversations within limits.
+            // User can override via options.contextManagement or set to false to disable.
+            if (model.options.contextManagement === false) {
+              delete model.options.contextManagement;
+            } else {
+              model.options.contextManagement ??= {
+                edits: [
+                  { type: "clear_tool_uses_20250919" },
+                  { type: "clear_thinking_20251015" },
+                ],
               };
             }
 
@@ -575,8 +604,8 @@ export async function OccoAuthPlugin({ client }) {
                     last.content.some((p) => p?.type !== "tool_result")
                   ) ||
                   imgMsg(last) ||
-                  userCount !== 1
-                : last?.role !== "user" || imgMsg(last) || userCount !== 1;
+                  userCount > 1
+                : last?.role !== "user" || imgMsg(last) || userCount > 1;
               const isVision = msgs.some(
                 (msg) =>
                   Array.isArray(msg.content) &&
