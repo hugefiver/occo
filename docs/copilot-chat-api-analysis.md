@@ -1,26 +1,28 @@
 # VS Code Copilot Chat 官方插件 API 请求行为分析
 
-> 分析日期：2026-03-27
-> 对比版本：OCCO 模拟 v0.38.2 vs 官方 v0.36.0 ~ v0.42.x
+> 分析日期：2026-03-27 (updates: 2026-04-13)
+> 对比版本：OCCO 模拟 v0.38.2 vs 官方 v0.36.0 ~ v0.44.x (main)
 > 源码仓库：microsoft/vscode-copilot-chat（MIT，2025年12月开源）
 
 ## 一、版本演进时间线
 
-| 版本      | VS Code 引擎 | 关键变化                                                                                                                                                                                                  |
-| --------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| v0.36.0   | ^1.109.0     | 最早可获取的公开版本。单一 HTTP 路径，X-Initiator 在 chatMLFetcher.ts，X-Interaction-Type 无条件设置，thinking 仅 enabled/disabled                                                                        |
-| v0.37.0   | ^1.109.0     | 同 v0.36.0，增加 context_management 字段                                                                                                                                                                  |
-| v0.37.8/9 | ^1.109.0     | 同上，最后一个单一 HTTP 路径版本                                                                                                                                                                          |
-| v0.38.0   | ^1.110.0     | **重大重构**：拆分 HTTP/WebSocket 双路径，X-Interaction-Type 改为有条件，新增 X-Agent-Task-Id，thinking 增加 adaptive 类型，新增 output_config.effort，新增 conversation-subagent/conversation-background |
-| v0.38.2   | ^1.110.0     | 同 v0.38.0 结构                                                                                                                                                                                           |
-| v0.39.0   | ^1.111.0     | X-Interaction-Type 回归无条件（agentInteractionType 逻辑末尾返回 intent 而非 undefined），X-Agent-Task-Id 也变为无条件                                                                                    |
-| v0.40.0   | ^1.111.0     | capabilities 动态化（supportsAdaptiveThinking 等从 modelMetadata 获取），Gemini function calling mode 实验                                                                                                |
-| v0.41.0   | ^1.111.0     | Messages API 思维控制从 `!disableThinking` 改为 `enableThinking`（正向控制），新增 `forceExtendedThinking` 实验，Responses API effort 来源从实验配置改为 `options.reasoningEffort`                        |
-| v0.41.1/2 | ^1.111.0     | 与 v0.41.0 所有关键文件（networking.ts, chatEndpoint.ts, messagesApi.ts, responsesApi.ts）**完全一致**                                                                                                    |
-| v0.42.x   | ^1.111.0     | IEndpointBody 新增 `prompt_cache_key` 字段，Responses API 支持 prompt 缓存（`ResponsesApiPromptCacheKeyEnabled` 实验），effort 默认值改为 `'medium'`                                                      |
-| main      | ^1.111.0     | 与 v0.42.0 基本一致，version 仍为 0.42.0。X-Initiator 确认仍存在于 chatMLFetcher.ts line 1255                                                                                                             |
+| 版本      | VS Code 引擎 | 关键变化                                                                                                                                                                                                                                                                                                                                      |
+| --------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v0.36.0   | ^1.108.0     | 最早可获取的公开版本。单一 HTTP 路径，X-Initiator 在 chatMLFetcher.ts，X-Interaction-Type 无条件设置，thinking 仅 enabled/disabled                                                                                                                                                                                                            |
+| v0.37.0   | ^1.109.0     | 同 v0.36.0，增加 context_management 字段                                                                                                                                                                                                                                                                                                      |
+| v0.37.8/9 | ^1.109.0     | 同上，最后一个单一 HTTP 路径版本                                                                                                                                                                                                                                                                                                              |
+| v0.38.0   | ^1.110.0     | **重大重构**：拆分 HTTP/WebSocket 双路径，X-Interaction-Type 改为有条件，新增 X-Agent-Task-Id，thinking 增加 adaptive 类型，新增 output_config.effort，新增 conversation-subagent/conversation-background                                                                                                                                     |
+| v0.38.2   | ^1.110.0     | 同 v0.38.0 结构                                                                                                                                                                                                                                                                                                                               |
+| v0.39.0   | ^1.111.0     | X-Interaction-Type 回归无条件（agentInteractionType 逻辑末尾返回 intent 而非 undefined），X-Agent-Task-Id 也变为无条件                                                                                                                                                                                                                        |
+| v0.40.0   | ^1.111.0     | capabilities 动态化（supportsAdaptiveThinking 等从 modelMetadata 获取），Gemini function calling mode 实验                                                                                                                                                                                                                                    |
+| v0.41.0   | ^1.111.0     | Messages API 思维控制从 `!disableThinking` 改为 `enableThinking`（正向控制），新增 `forceExtendedThinking` 实验，Responses API effort 来源从实验配置改为 `options.reasoningEffort`                                                                                                                                                            |
+| v0.41.1/2 | ^1.111.0     | 与 v0.41.0 所有关键文件（networking.ts, chatEndpoint.ts, messagesApi.ts, responsesApi.ts）**完全一致**                                                                                                                                                                                                                                        |
+| v0.42.x   | ^1.111.0     | IEndpointBody 新增 `prompt_cache_key` 字段，Responses API 支持 prompt 缓存（`ResponsesApiPromptCacheKeyEnabled` 实验），effort 默认值改为 `'medium'`                                                                                                                                                                                          |
+| v0.43.0   | ^1.115.0     | **`forceExtendedThinking` 全面移除**（#4966）。WebSocket 改为按会话复用连接（#4827，去掉 turnId 参数）。内联摘要（inline summarization, #4956）。effort guard 改为 `supportsReasoningEffort?.length`。`AnthropicPromptOptimization` 移除，Claude 4.6 优化提示成为默认（#4941）。OTel 增强。Chat replay 移除（#4879）。Anthropic SDK 0.81→0.82 |
+| v0.44.0   | ^1.115.0     | 仅 1 commit（#4916）：Subagent 遥测增强（`parentToolCallId`、`requestId`、`parentChatSessionId`、`debugLogLabel` 传播至 OTel），`headerRequestId` fallback 逻辑，autopilot retry 消息区分模式                                                                                                                                                 |
+| main      | ^1.115.0     | 即 v0.44.0。chatEndpoint.ts 的 thinking 逻辑已从 `customizeCapiBody()` 移出（仅剩 Gemini function calling mode），思维预算逻辑迁移至 anthropicProvider.ts（BYOK 路径）。X-Initiator 确认仍存在于 chatMLFetcher.ts line ~1340                                                                                                                  |
 
-> **X-Initiator 全版本确认**：通过 grep.app 搜索 main 分支确认，`X-Initiator` 从 v0.36.0 到 main 一直存在于 chatMLFetcher.ts 的 additionalHeaders 中（line 1255），**从未被移除**。networking.ts HTTP 路径从未有过 X-Initiator。
+> **X-Initiator 全版本确认**：通过 grep.app 搜索 main 分支确认，`X-Initiator` 从 v0.36.0 到 main 一直存在于 chatMLFetcher.ts 的 additionalHeaders 中（line ~1340），**从未被移除**。networking.ts HTTP 路径从未有过 X-Initiator。
 
 ## 二、HTTP Headers 详细分析
 
@@ -34,13 +36,14 @@
 const headers: ReqHeaders = {
   Authorization: `Bearer ${secretKey}`, // Copilot session token
   "X-Request-Id": requestId, // UUID
-  "X-Interaction-Type": intent, // v0.37.x 无条件; v0.38.x 有条件; v0.39.x+ 无条件
   "OpenAI-Intent": intent, // 动态，来自 locationToIntent()
   "X-GitHub-Api-Version": "2025-05-01",
   ...additionalHeaders, // 来自 chatMLFetcher.ts
   ...(endpoint.getExtraHeaders ? endpoint.getExtraHeaders(location) : {}),
 };
 // v0.38.0+ 新增（有条件或无条件，取决于版本）：
+// agentInteractionType 决定值：subagent → conversation-subagent，background → conversation-background，其他 → intent
+headers["X-Interaction-Type"] = agentInteractionType; // v0.37.x 直接用 intent; v0.38.x 有条件; v0.39.x+ 无条件
 headers["X-Agent-Task-Id"] = requestId;
 ```
 
@@ -121,11 +124,12 @@ const agentInteractionType =
 ```typescript
 userInitiatedRequest: (iterationNumber === 0 &&
   !isContinuation &&
-  !subAgentInvocationId) ||
-  stopHookUserInitiated;
+  !this.options.request.subAgentInvocationId &&
+  !this.options.request.isSystemInitiated) ||
+  this.stopHookUserInitiated;
 ```
 
-含义：首次迭代 + 非续接 + 非子Agent调用 → user；工具调用后续轮次 → agent
+含义：首次迭代 + 非续接 + 非子Agent调用 + 非系统发起 → user；工具调用后续轮次 → agent。`stopHookUserInitiated` 可覆盖（stop hook 触发时强制 user）
 
 **subagent 的特殊行为**：由于 `subAgentInvocationId` 存在，subagent 的 `userInitiatedRequest` **始终为 false**，即 `X-Initiator` 永远是 `agent`。
 
@@ -184,7 +188,7 @@ protected override async fetch(opts: ToolCallingLoopFetchOptions, token: Cancell
 
 `this.options.request.subAgentInvocationId` 在 loop 创建时设置，不会改变。`fetch()` 每次迭代都会被调用，因此 subagent 的**所有请求**都携带 `{ kind: 'subagent' }`。
 
-同样，`searchSubagentToolCallingLoop.ts` 和 `executionSubagentToolCallingLoop.ts` 直接硬编码 `requestKindOptions: { kind: 'subagent' }`。
+同样，`searchSubagentToolCallingLoop.ts` 直接硬编码 `userInitiatedRequest: false` 和 `requestKindOptions: { kind: 'subagent' }`。`executionSubagentToolCallingLoop.ts` 仅硬编码 `userInitiatedRequest: false`，**不传** `requestKindOptions`（依赖上层 defaultIntentRequestHandler 的传递）。
 
 **完整的 intent 分配矩阵：**
 
@@ -235,10 +239,13 @@ OCCO 使用此路径。官方通过 `chatEndpoint.ts` 的 `customizeCapiBody()` 
 
 **请求体字段**：`body.thinking_budget = N`（整数）
 
-**所有版本一致的逻辑（v0.36.0 ~ v0.42.x）：**
+**v0.36.0 ~ v0.42.x 的逻辑（main 已移除，见下方注释）：**
 
 ```typescript
 // chatEndpoint.ts → customizeCapiBody()
+// ⚠️ 注意：此代码块在 main (v0.44.0) 上已从 customizeCapiBody() 中移除，
+// 仅剩 Gemini function calling mode。思维预算逻辑迁移至 anthropicProvider.ts（BYOK 路径）。
+// 以下为 v0.36.0 ~ v0.42.x 历史版本的逻辑：
 if (
   isAnthropicFamily(this) &&
   !options.disableThinking &&
@@ -249,14 +256,14 @@ if (
 }
 ```
 
-**`_getThinkingBudget()` 计算方式：**
+**`_getThinkingBudget()` 计算方式**（v0.36.0 ~ v0.42.x 在 chatEndpoint.ts；main 迁移至 anthropicProvider.ts）：
 
 ```typescript
 const configuredBudget = getExperimentConfig(ConfigKey.AnthropicThinkingBudget);
 // 默认值：16000
 const normalizedBudget =
   configuredBudget > 0
-    ? Math.max(1024, configuredBudget) // 最小 1024
+    ? Math.max(1024, configuredBudget) // 最小 1024（main 用三元运算符实现，逻辑等价）
     : undefined;
 return normalizedBudget
   ? Math.min(32000, maxOutputTokens - 1, normalizedBudget) // 上限 32000
@@ -313,14 +320,15 @@ prompt_cache_key?: string;
 
 **Messages API 思维控制逻辑演进：**
 
-| 版本    | 启用条件                | adaptive 支持 | effort 控制                   | forceExtendedThinking |
-| ------- | ----------------------- | ------------- | ----------------------------- | --------------------- |
-| v0.37.x | `!disableThinking`      | ❌            | ❌                            | ❌                    |
-| v0.38.x | `!disableThinking`      | ✅            | ✅ (adaptive 模型)            | ❌                    |
-| v0.40.0 | `!disableThinking`      | ✅ (动态化)   | ✅ (adaptive 模型)            | ❌                    |
-| v0.41.x | `enableThinking` (正向) | ✅            | ✅ (adaptive 模型, 带验证)    | ✅                    |
-| v0.42.x | `enableThinking`        | ✅            | ✅ (仅 adaptive + type match) | ✅                    |
-| main    | `enableThinking`        | ✅            | ✅ (仅 adaptive + type match) | ✅                    |
+| 版本    | 启用条件                | adaptive 支持 | effort 控制                                     | forceExtendedThinking                         |
+| ------- | ----------------------- | ------------- | ----------------------------------------------- | --------------------------------------------- |
+| v0.37.x | `!disableThinking`      | ❌            | ❌                                              | ❌                                            |
+| v0.38.x | `!disableThinking`      | ✅            | ✅ (adaptive 模型)                              | ❌                                            |
+| v0.40.0 | `!disableThinking`      | ✅ (动态化)   | ✅ (adaptive 模型)                              | ❌                                            |
+| v0.41.x | `enableThinking` (正向) | ✅            | ✅ (adaptive 模型, 带验证)                      | ✅ (实验性, `AnthropicForceExtendedThinking`) |
+| v0.42.x | `enableThinking`        | ✅            | ✅ (仅 adaptive + type match)                   | ✅ (同 v0.41.x)                               |
+| v0.43.x | `enableThinking`        | ✅            | ✅ (gated by `supportsReasoningEffort?.length`) | ❌ (**已移除** #4966)                         |
+| v0.44.x | `enableThinking`        | ✅            | ✅ (同 v0.43.x)                                 | ❌ (已移除)                                   |
 
 **v0.41.x 新增细节：**
 
@@ -350,6 +358,27 @@ const effort =
     : undefined;
 ```
 
+**v0.43.x 变化（forceExtendedThinking 移除）：**
+
+```typescript
+// forceExtendedThinking guard 移除，adaptive 条件简化为：
+if (!thinkingExplicitlyDisabled) {  // 原为 !thinkingExplicitlyDisabled && !forceExtendedThinking
+    if (endpoint.supportsAdaptiveThinking) {
+        thinkingConfig = { type: 'adaptive' };
+    } else if (...) {
+        thinkingConfig = { type: 'enabled', budget_tokens: computed };
+    }
+}
+
+// effort guard 改为检查 supportsReasoningEffort 数组长度：
+const candidateEffort = endpoint.supportsReasoningEffort?.length
+    ? (configService.getConfig(ConfigKey.TeamInternal.AnthropicThinkingEffort) ?? reasoningEffort)
+    : undefined;
+// 注：TeamInternal.AnthropicThinkingEffort 优先于 reasoningEffort（用于 evals）
+
+// CacheBreakpoint 修复：空白文本块改为 pendingCacheControl 延迟模式
+```
+
 ### 3.3 GPT 模型 — Responses API 路径（`/responses`）
 
 **请求体（responsesApi.ts）：**
@@ -375,15 +404,16 @@ body.store = false;
 
 **reasoning effort 来源演进：**
 
-| 版本    | effort 来源                                                           | 默认值                            |
-| ------- | --------------------------------------------------------------------- | --------------------------------- |
-| v0.37.x | `configService.getExperimentBasedConfig(ResponsesApiReasoningEffort)` | 'medium' (当 config='default' 时) |
-| v0.38.x | 同上                                                                  | 同上                              |
-| v0.39.x | 同上                                                                  | 同上                              |
-| v0.40.0 | 同上                                                                  | 同上                              |
-| v0.41.x | `options.reasoningEffort`（从调用方传入）                             | 无默认                            |
-| v0.42.x | `options.reasoningEffort \|\| 'medium'`                               | 'medium'                          |
-| main    | `options.reasoningEffort`                                             | 无默认                            |
+| 版本    | effort 来源                                                                                            | 默认值                                          |
+| ------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| v0.37.x | `configService.getExperimentBasedConfig(ResponsesApiReasoningEffort)`                                  | 'medium' (当 config='default' 时)               |
+| v0.38.x | 同上                                                                                                   | 同上                                            |
+| v0.39.x | 同上                                                                                                   | 同上                                            |
+| v0.40.0 | 同上                                                                                                   | 同上                                            |
+| v0.41.x | `options.reasoningEffort`（从调用方传入）                                                              | 无默认                                          |
+| v0.42.x | `options.reasoningEffort \|\| 'medium'`                                                                | 'medium'                                        |
+| v0.43.x | `effortFromSetting \|\| options.reasoningEffort \|\| 'medium'`，但需 `supportsReasoningEffort?.length` | 'medium'（仅当 supportsReasoningEffort 存在时） |
+| v0.44.x | 同 v0.43.x                                                                                             | 同上                                            |
 
 **v0.42.x 新增 prompt_cache_key：**
 
@@ -584,16 +614,83 @@ GPT_CODEX_VARIANTS: {
 
 ### 7.2 存在差异 ⚠️
 
-| 项目                                | 官方行为                | OCCO 行为               | 影响                         |
-| ----------------------------------- | ----------------------- | ----------------------- | ---------------------------- |
-| X-Initiator 多轮判断                | 新迭代 → user           | userCount>1 → agent     | 低，可能更省配额             |
-| OpenAI-Intent 动态性                | locationToIntent() 动态 | 固定 conversation-agent | 低，opencode 本质是 Agent    |
-| GPT 默认 reasoning effort           | 始终发送 medium         | 仅变体选择时发送        | 中，可能影响默认推理质量     |
-| body.text.verbosity                 | 模型级别配置            | 缺少                    | 低                           |
-| body.truncation                     | 'auto' 或 'disabled'    | 缺少                    | 低                           |
-| body.store                          | false                   | 缺少                    | 低                           |
-| X-VSCode-User-Agent-Library-Version | 存在                    | 缺少                    | 低，服务端不依赖             |
-| Messages API                        | 支持 /v1/messages       | 不支持                  | 低，ChatCompletions 功能等价 |
+| 项目                                | 官方行为                                                                                            | OCCO 行为                          | 影响                              |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------- |
+| X-Initiator 判定逻辑                | 基于状态机：`iterationNumber===0 && !isContinuation && !subAgentInvocationId && !isSystemInitiated` | 基于 body 结构分析 + parentID 覆盖 | **中**，见下方 §7.3 详细分析      |
+| X-Interaction-Type subagent 分支    | subagent→`conversation-subagent`，background→`conversation-background`                              | 始终 `conversation-agent`          | 低，无证据影响计费（仅遥测/路由） |
+| OpenAI-Intent 动态性                | locationToIntent() 动态                                                                             | 固定 conversation-agent            | 低，opencode 本质是 Agent         |
+| GPT 默认 reasoning effort           | 始终发送 medium                                                                                     | 仅变体选择时发送                   | 中，可能影响默认推理质量          |
+| body.prompt_cache_key               | `${conversationId}:${endpoint.family}`（实验门控）                                                  | 缺少                               | **中**，影响缓存命中率→间接成本   |
+| body.text.verbosity                 | 模型级别配置（gpt-5.1→`'low'`）                                                                     | 缺少                               | 低，间接影响输出长度              |
+| body.truncation                     | `'auto'` 或 `'disabled'`                                                                            | 缺少                               | 低，间接影响 token 使用           |
+| body.store                          | `false`                                                                                             | 缺少                               | 低，仅影响数据保留策略            |
+| X-VSCode-User-Agent-Library-Version | 存在                                                                                                | 缺少                               | 低，服务端不依赖                  |
+| Messages API                        | 支持 /v1/messages                                                                                   | 不支持                             | 低，ChatCompletions 功能等价      |
+| WebSocket initiator 位置            | WS 路径：payload body 中 `initiator: 'user'\|'agent'`                                               | HTTP only（header X-Initiator）    | 无，OCCO 仅使用 HTTP              |
+
+### 7.3 X-Initiator 判定逻辑差异详细分析
+
+**官方完整判定链** (toolCallingLoop.ts → chatMLFetcher.ts → networking.ts)：
+
+```typescript
+// toolCallingLoop.ts L1469-1474
+const userInitiatedRequest =
+  (iterationNumber === 0
+    && !isContinuation
+    && !this.options.request.subAgentInvocationId
+    && !this.options.request.isSystemInitiated)
+  || this.stopHookUserInitiated;
+
+// chatMLFetcher.ts L1340-1346 — 传入 additionalHeaders
+'X-Initiator': userInitiatedRequest ? 'user' : 'agent'
+
+// networking.ts L382-389 — 不做二次判断，直接合并
+{ ...additionalHeaders }
+```
+
+**OCCO 判定逻辑** (index.mjs isAgent 检测)：
+
+```javascript
+// ChatCompletions 路径 (body.messages + URL includes 'completions')
+isAgent = last?.role !== "user" || imgMsg(last) || userCount !== 1
+
+// Responses API 路径 (body.input)
+isAgent = last?.role !== "user" || imgMsg(last) || userCount !== 1
+
+// Messages API 路径 (body.messages, 非 completions URL)
+isAgent = !(last?.role === "user"
+  && last.content.some(p => p?.type !== "tool_result"))
+  || imgMsg(last) || userCount !== 1
+
+// parentID 覆盖（来自 chat.headers hook）
+finalIsAgent = bodyIsAgent || initHeaders["x-initiator"] === "agent"
+
+// 最终 header
+"X-Initiator": isAgent ? "agent" : "user"
+```
+
+**关键差异场景**：
+
+| 场景                               | 官方结果 | OCCO 结果            | 说明                                                      |
+| ---------------------------------- | -------- | -------------------- | --------------------------------------------------------- |
+| 首次用户消息                       | ✅ user  | ✅ user              | 一致                                                      |
+| 工具调用迭代 (iterationNumber > 0) | agent    | body分析决定         | 若最后消息是 tool result 后 user 追问，OCCO 可能返回 user |
+| 继续请求 (isContinuation)          | agent    | body分析决定         | OCCO 无 isContinuation 概念，看 body 结构                 |
+| 子代理请求 (subAgentInvocationId)  | agent    | agent (parentID覆盖) | OCCO 用 parentID 机制达到同等效果                         |
+| isSystemInitiated 请求             | agent    | body分析决定         | OCCO 无此概念                                             |
+| stopHook 恢复                      | user     | body分析决定         | OCCO 无 stopHook 机制                                     |
+
+> **风险评估**：OCCO 的 body 分析在大多数场景下与官方一致（工具调用后 body 结构自然呈现 agent 特征），但在 continuation 和 system-initiated 边界情况下可能产生分歧。`parentID` 覆盖机制在子代理场景下有效保障了一致性。
+
+### 7.4 requestKindOptions 死代码
+
+官方 networking.ts 的 `agentInteractionType` 分支中，`{kind: 'background'}` 路径（→ `conversation-background`）在当前代码中**从未被调用**。接口已定义但无生产代码设置该值。仅 `{kind: 'subagent'}` 有两处使用：
+
+- `defaultIntentRequestHandler.ts`：条件设置（当 `subAgentInvocationId` 存在时）
+- `searchSubagentToolCallingLoop.ts`：硬编码
+- `executionSubagentToolCallingLoop.ts`：**不设置** requestKindOptions（其 X-Interaction-Type 退化为 `intent` 值）
+
+> OCCO 始终使用 `conversation-agent` 作为 X-Interaction-Type，这与 executionSubagent 的实际行为一致（都使用非 subagent 的 intent 值）。
 
 ## 八、已知问题与历史经验
 
@@ -611,7 +708,50 @@ GPT_CODEX_VARIANTS: {
 - 结果：每个工具调用都被计为 premium，快速消耗配额
 - 解决：回退到 v0.38.2 版本号 + 保留 X-Initiator
 
-### 8.3 Intent 变迁历史
+### 8.3 prompt_cache_key 缺失的成本影响
+
+官方 v0.42.x+ 在 Responses API 请求中发送 `prompt_cache_key`（格式 `${conversationId}:${endpoint.family}`），用于服务端 prompt 缓存。
+
+- **缓存命中**时，重复的 system prompt 和历史消息作为 cached input tokens 计费（价格低于 uncached）
+- **缺少此字段**时，每次请求都按完整 input token 计费
+- 此字段本身不产生额外费用，但能显著降低长会话的 token 成本
+- 实验门控：`ConfigKey.ResponsesApiPromptCacheKeyEnabled`——服务端可能尚未全量开放
+
+**影响评估**：**中等**。对短会话（1-2轮）影响极小；对长会话（10+ 轮）可能节省 30-50% 的 input token 成本。OCCO 当前不维护 conversationId 语义（每次请求独立），实现需要：
+
+1. 为每个会话维护稳定的 conversationId
+2. 在 Responses API body 中添加 `prompt_cache_key: "${conversationId}:${modelFamily}"`
+
+### 8.4 Responses API isAgent 检测边界情况
+
+OCCO 的 Responses API isAgent 检测（`body.input` 路径）存在一个边界情况：
+
+```
+场景：工具调用后，body.input 结构为 [...tool_outputs, {role: "user", content: "继续"}]
+```
+
+- **官方**：`iterationNumber > 0` → 始终 `agent`（无论 body 结构）
+- **OCCO**：`last.role === "user" && userCount === 1` → **`user`**
+
+此差异可能导致 OCCO 在工具调用迭代中将本应计为 agent 的请求标记为 user。
+
+**影响评估**：**低到中**。取决于服务端是否基于 X-Initiator 区分 premium 计费。从 v0.40.0 计费事件看，X-Initiator 对计费有影响，但 OCCO 的 body 分析在绝大多数多轮场景下自然返回 agent（因为 userCount > 1）。唯一风险是首次工具调用结果后仅附加一条 user 消息的极端情况。
+
+> 注意：`function_call_output` 类型的 item 在 Responses API 路径中**未做特殊处理**，不影响 role 计数。`previous_response_id` 也不参与检测。
+
+### 8.5 body 字段对计费的直接/间接影响总结
+
+| 字段               | 计费影响       | 说明                                           |
+| ------------------ | -------------- | ---------------------------------------------- |
+| `prompt_cache_key` | **间接**（中） | 缺失→无缓存→更高 input token 成本              |
+| `text.verbosity`   | **间接**（低） | `'low'` 减少输出量→节省 output token，非硬限制 |
+| `truncation`       | **间接**（低） | `'auto'` 自动截断长上下文→节省 input token     |
+| `store`            | **无**         | 仅控制数据保留策略，不影响计费/配额            |
+| `reasoning.effort` | **间接**（中） | 影响推理 token 消耗量，OCCO 仅在变体选择时发送 |
+
+> **Copilot 配额核心机制**：由 `modelMetadata.billing`（`is_premium`, `multiplier`, `restricted_to`）从 endpointProvider 返回，不由上述 body 字段驱动。这些字段影响的是实际 token 消耗量，而非配额计算公式。
+
+### 8.6 Intent 变迁历史
 
 | 时期           | OCCO Intent           | 结果                                |
 | -------------- | --------------------- | ----------------------------------- |
@@ -664,6 +804,7 @@ v0.40.0 引入了模型元数据动态化：
 - 新增 `modelProvider` 字段，来自 `modelMetadata.vendor`
 - `getExtraHeaders()` 判断条件从 `modelSupportsInterleavedThinking(model)` 改为 `!this.supportsAdaptiveThinking`（取反逻辑）
 - chatEndpoint.ts `customizeCapiBody()` 的 Claude thinking_budget 逻辑**未变**（ChatCompletions 路径不受影响）
+- ⚠️ 注意：v0.43.0+ 中 `customizeCapiBody()` 的 thinking 逻辑已移除（仅剩 Gemini function calling mode），迁移至 anthropicProvider.ts（BYOK 路径）
 
 **对 OCCO 的影响**：
 
@@ -678,7 +819,7 @@ v0.41.x 的关键变化集中在思维链控制和推理参数来源：
 **Messages API 变化（OCCO 未使用，备记录）：**
 
 - `enableThinking`（正向）替代 `!disableThinking`（双重否定）
-- 新增 `forceExtendedThinking` 实验：强制使用 extended thinking 而非 adaptive
+- 新增 `forceExtendedThinking` 实验：强制使用 extended thinking 而非 adaptive（⚠️ v0.43.0 中已全面移除 #4966）
 - effort 级别现在从调用方 `options.reasoningEffort` 获取，而非实验配置
 
 **Responses API 变化（影响 GPT 模型）：**
@@ -728,7 +869,105 @@ if (experimentService.getConfig(ConfigKey.ResponsesApiPromptCacheKeyEnabled)) {
 - Header 无变化
 - 如需实现：需为每个会话维护 conversationId，并在 Responses API body 中添加 prompt_cache_key
 
-### 9.5 升级到 Messages API 的考虑
+### 9.5 升级到 v0.43.x 的额外考虑
+
+v0.43.0 是自 v0.38.0 以来最大的一次变更（~120 commits, 266 files changed），关键变化：
+
+**1. `forceExtendedThinking` 全面移除（#4966）：**
+
+- `AnthropicForceExtendedThinking` 配置项及所有引用删除
+- messagesApi.ts: adaptive gate 从 `!thinkingExplicitlyDisabled && !forceExtendedThinking` 简化为 `!thinkingExplicitlyDisabled`
+- chatEndpoint.ts: beta header 条件从 `!this.supportsAdaptiveThinking || forceExtendedThinking` 简化为 `!this.supportsAdaptiveThinking`
+- anthropicProvider.ts (BYOK): `forceExtendedThinking` 移除，`supportsAdaptiveThinking` 不再被 forceNonAdaptive 门控
+
+**2. Claude 4.6 优化提示成为默认（#4941）：**
+
+- `AnthropicPromptOptimization` 配置项移除，优化后的提示直接作为默认值
+
+**3. WebSocket 改为按会话复用连接（#4827）：**
+
+```typescript
+// v0.42.x: 按 (conversationId, turnId) 管理
+getOrCreateConnection(conversationId, turnId, headers)
+hasActiveConnection(conversationId, turnId)
+closeConnection(conversationId, turnId?)
+
+// v0.43.x: 按 conversationId 管理，turnId 移到 sendRequest()
+getOrCreateConnection(conversationId, headers)
+hasActiveConnection(conversationId)
+closeConnection(conversationId)
+connection.sendRequest(request, { userInitiated, turnId }, token)
+// 连接跟踪 _turnId, _previousTurnId, _hadActiveRequest（遥测用）
+```
+
+**4. 内联摘要（Inline Summarization, #4956）：**
+
+- 新增 `InlineSummarizationRequestedMetadata` 系统
+- `_isInlineSummarizationRequest` 标志
+- 摘要提取/存储，"Compacting conversation..." 进度提示
+- 摘要期间抑制流式输出，`applySummaryToRound()` 方法
+
+**5. effort guard 统一为数组长度检查：**
+
+```typescript
+// v0.42.x: boolean 检查
+endpoint.supportsAdaptiveThinking && thinkingConfig?.type === "adaptive";
+
+// v0.43.x: 数组长度检查（Messages API 和 Responses API 统一）
+endpoint.supportsReasoningEffort?.length;
+// anthropicProvider.ts (BYOK): 也改为 includes 检查
+modelCapabilities?.supportsReasoningEffort; // 数组类型
+// effort 类型扩展为 'low' | 'medium' | 'high' | 'max'
+```
+
+**6. 新增 Team-Internal 配置（用于 evals）：**
+
+- `ConfigKey.TeamInternal.ResponsesApiReasoningEffort`：Responses API effort 覆盖
+- `ConfigKey.TeamInternal.AnthropicThinkingEffort`：Messages API effort 覆盖
+- 这些配置优先于 `options.reasoningEffort`
+
+**7. 其他变化：**
+
+- OTel 增强：workspace metadata, custom mode name, `turn_start`/`turn_end` events, `tools_available` event
+- `AgentHistorySummarizationWithPromptCache` → `AgentHistorySummarizationInline`（重命名）
+- Chat replay 功能移除（#4879）
+- AGENTS.md/CLAUDE.md 发现修复（#4989）
+- Anthropic SDK 0.81.0→0.82.0
+- `create_file` 改为单批次运行（#4920）
+- 新 DI：`@IGitService`（toolCallingLoop.ts）
+- automodeService.ts 重构为 `FetchedValue<AutoModeAPIResponse>` 模式
+- chatModelCapabilities.ts 新增 `isHiddenModelB()`、`isVSCModelC()`/`isVSCModelD()`
+
+**对 OCCO 的影响**：
+
+- ChatCompletions 路径（Claude）：chatEndpoint.ts thinking 逻辑已移除，但 OCCO 使用自己的实现，不受影响
+- WebSocket：如计划实现 WS 路径，需注意连接复用改为按 conversationId（不再含 turnId）
+- Header 无变化
+- 需更新版本号和 Engine-Version 至 `vscode/1.115.x`
+
+### 9.6 升级到 v0.44.x 的额外考虑
+
+v0.44.0 仅含 1 commit（#4916 "Yemohyle/subagent telem"），变化极小：
+
+**Subagent 遥测增强：**
+
+- `parentToolCallId` 添加到 execution/search subagent loop 选项和遥测属性
+- `requestId`（= subAgentInvocationId）添加到 subagent 遥测
+- `parentChatSessionId` 和 `debugLogLabel` 通过 CapturingToken 传播到 OTel attributes（`PARENT_CHAT_SESSION_ID`, `DEBUG_LOG_LABEL`）
+- `IChatDebugFileLoggerService.startChildSession()` 用于子代理调试日志
+
+**chatMLFetcher.ts：**
+
+- `headerRequestId` 处理：当服务端未回传 x-request-id 时保留 `ourRequestId` 作为 fallback
+- `headerRequestId` 从手动属性设置移到 `baseTelemetry` 构造
+
+**toolCallingLoop.ts：**
+
+- autopilot retry/continue 消息区分 autopilot 模式和非 autopilot 模式
+
+**对 OCCO 的影响**：无。纯遥测增强，不影响 API 请求行为。
+
+### 9.7 升级到 Messages API 的考虑
 
 参见 `docs/claude-messages-api-migration.md`。主要变化：
 
@@ -738,13 +977,13 @@ if (experimentService.getConfig(ConfigKey.ResponsesApiPromptCacheKeyEnabled)) {
 - 需要 `anthropic-version` 头
 - 路由到 `/v1/messages` 端点
 
-### 9.6 版本号选择原则
+### 9.8 版本号选择原则
 
 - 版本号必须是服务端已知的有效版本，否则 466
 - 建议选择当前实际在分发的稳定版本（marketplace 可查）
 - 版本号影响服务端的功能门控（feature gating）
 
-### 9.7 版本号修改位置
+### 9.9 版本号修改位置
 
 修改版本时需要更新 `index.mjs` 中的 **5 处**：
 
@@ -758,19 +997,21 @@ if (experimentService.getConfig(ConfigKey.ResponsesApiPromptCacheKeyEnabled)) {
 
 > 注意：前3处在 HEADERS 常量中，后2处在 OAuth 认证流程中。User-Agent 和 Editor-Plugin-Version 的版本号必须一致。
 
-### 9.8 版本号与 VS Code 引擎版本对应关系
+### 9.10 版本号与 VS Code 引擎版本对应关系
 
 | Copilot Chat 版本 | VS Code 引擎要求 | 推荐 Editor-Version |
 | ----------------- | ---------------- | ------------------- |
-| v0.36.x           | ^1.109.0         | vscode/1.109.1      |
+| v0.36.x           | ^1.108.0         | vscode/1.108.x      |
 | v0.37.x           | ^1.109.0         | vscode/1.109.1      |
 | v0.38.x           | ^1.110.0         | vscode/1.110.1      |
 | v0.39.x           | ^1.111.0         | vscode/1.111.x      |
 | v0.40.x           | ^1.111.0         | vscode/1.111.x      |
 | v0.41.x           | ^1.111.0         | vscode/1.111.x      |
 | v0.42.x           | ^1.111.0         | vscode/1.111.x      |
+| v0.43.x           | ^1.115.0         | vscode/1.115.x      |
+| v0.44.x (main)    | ^1.115.0         | vscode/1.115.x      |
 
-### 9.9 OCCO 版本变迁历史
+### 9.11 OCCO 版本变迁历史
 
 | Commit  | 模拟版本 | Intent                | 说明                                  |
 | ------- | -------- | --------------------- | ------------------------------------- |
