@@ -30,8 +30,10 @@
           pkgs = nixpkgs.legacyPackages.${system};
 
           # Rebuild node_modules with correct hash (upstream hashes.json can go stale)
+          # Per-system hashes — auto-updated by .github/workflows/update-node-modules-hash.yml
+          nodeModulesHashes = builtins.fromJSON (builtins.readFile ./nix/node-modules-hashes.json);
           node_modules = opencode-upstream.packages.${system}.opencode.node_modules.override {
-            hash = "sha256-85wpU1oCWbthPleNIOj5d5AOuuYZ6rM7gMLZR6YJ2WU=";
+            hash = nodeModulesHashes.${system};
           };
 
           # Patched opencode: upstream build + our occo patches + fixed node_modules

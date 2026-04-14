@@ -1,7 +1,4 @@
 node_modules
-.DS_Store
-result
-result-*
-opencode/
-opencode-dcp/
 temp/
+/pkgs/*/target
+/result

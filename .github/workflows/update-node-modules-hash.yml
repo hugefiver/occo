@@ -1,0 +1,114 @@
+name: Update node_modules hashes
+
+on:
+  push:
+    paths:
+      - flake.lock
+  schedule:
+    - cron: "0 8 * * 1" # Weekly Monday 8:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Check node_modules hash
+        id: check
+        run: |
+          SYSTEM="${{ matrix.system }}"
+          CURRENT=$(jq -r ".\"${SYSTEM}\"" nix/node-modules-hashes.json)
+
+          BUILD_OUTPUT=$(nix build ".#packages.${SYSTEM}.opencode" --no-link 2>&1) && {
+            echo "Hash is up to date for ${SYSTEM}"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # Build failed — check if it's a hash mismatch
+          NEW_HASH=$(echo "$BUILD_OUTPUT" | grep -oP 'got:\s+\Ksha256-\S+')
+          if [ -z "$NEW_HASH" ]; then
+            echo "::error::Build failed for ${SYSTEM} (not a hash mismatch)"
+            echo "$BUILD_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          if [ "$NEW_HASH" = "$CURRENT" ]; then
+            echo "::error::Hash matches but build still failed for ${SYSTEM}"
+            echo "$BUILD_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "Hash changed for ${SYSTEM}: ${CURRENT} -> ${NEW_HASH}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "new_hash=${NEW_HASH}" >> "$GITHUB_OUTPUT"
+
+      - name: Write hash to artifact
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          mkdir -p /tmp/hash-result
+          echo -n "${{ steps.check.outputs.new_hash }}" > "/tmp/hash-result/${{ matrix.system }}"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.check.outputs.changed == 'true'
+        with:
+          name: hash-${{ matrix.system }}
+          path: /tmp/hash-result/${{ matrix.system }}
+          retention-days: 1
+
+  update:
+    needs: check
+    if: ${{ !cancelled() && contains(needs.check.result, 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/hashes
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Update hash file
+        id: update
+        run: |
+          CHANGED=false
+          for f in /tmp/hashes/*; do
+            [ -f "$f" ] || continue
+            SYSTEM=$(basename "$f")
+            NEW_HASH=$(cat "$f")
+            CURRENT=$(jq -r ".\"${SYSTEM}\"" nix/node-modules-hashes.json)
+            if [ "$NEW_HASH" != "$CURRENT" ]; then
+              jq --arg sys "$SYSTEM" --arg hash "$NEW_HASH" \
+                '.[$sys] = $hash' nix/node-modules-hashes.json > tmp.json \
+                && mv tmp.json nix/node-modules-hashes.json
+              echo "Updated ${SYSTEM}: ${CURRENT} -> ${NEW_HASH}"
+              CHANGED=true
+            fi
+          done
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add nix/node-modules-hashes.json
+          git commit -m "nix: update node_modules hashes"
+          git push

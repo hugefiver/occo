@@ -474,9 +474,7 @@ export async function OccoAuthPlugin({ client }) {
             if (modelsResp.ok) {
               const data = await modelsResp.json();
               const map = {};
-              for (const r of Array.isArray(data)
-                ? data
-                : data?.data || []) {
+              for (const r of Array.isArray(data) ? data : data?.data || []) {
                 if (r?.id) map[r.id] = r;
               }
               cachedRemoteMap = map;
@@ -499,7 +497,7 @@ export async function OccoAuthPlugin({ client }) {
 
             const isAdaptive =
               model.options?.adaptiveThinking ??
-              (supports?.adaptive_thinking === true);
+              supports?.adaptive_thinking === true;
             const maxBudget = supports?.max_thinking_budget;
 
             model.api = {
@@ -532,8 +530,8 @@ export async function OccoAuthPlugin({ client }) {
             } else {
               model.options.contextManagement ??= {
                 edits: [
-                  { type: "clear_tool_uses_20250919" },
                   { type: "clear_thinking_20251015" },
+                  { type: "clear_tool_uses_20250919" },
                 ],
               };
             }
