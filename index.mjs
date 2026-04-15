@@ -597,18 +597,22 @@ export async function OccoAuthPlugin({ client }) {
               const userCount = msgs.filter(
                 (x) =>
                   x?.role === "user" &&
+                  !/^[@/]/.test(x?.content) &&
                   (!isMessagesApi ||
                     (Array.isArray(x?.content) &&
                       x?.content?.some((p) => p?.type !== "tool_result"))),
               ).length;
-              // const notUser = userCount > 1
-              const isAgent = isMessagesApi
-                ? !(
-                    last?.role === "user" &&
-                    Array.isArray(last?.content) &&
-                    last.content.some((p) => p?.type !== "tool_result")
-                  ) || imgMsg(last)
-                : last?.role !== "user" || imgMsg(last);
+              const notUser = userCount % 10 !== 1;
+              const isAgent =
+                notUser ||
+                /^[@/]/.test(last?.content) ||
+                (isMessagesApi
+                  ? !(
+                      last?.role === "user" &&
+                      Array.isArray(last?.content) &&
+                      last.content.some((p) => p?.type !== "tool_result")
+                    ) || imgMsg(last)
+                  : last?.role !== "user" || imgMsg(last));
               const isVision = msgs.some(
                 (msg) =>
                   Array.isArray(msg.content) &&
