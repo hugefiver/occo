@@ -113,7 +113,8 @@ pub struct SearchResult {
     pub location: Location,
     pub distance: f64,
     pub chunk: Chunk,
-    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +124,24 @@ pub struct Location {
     pub checkpoint: String,
     pub doc_id: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<Language>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Language {
+    pub id: u32,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChunkRange {
+    pub start: u64,
+    pub end: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,8 +149,8 @@ pub struct Location {
 pub struct Chunk {
     pub hash: String,
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line_range: Option<(u32, u32)>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub range: Option<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_range: Option<ChunkRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<ChunkRange>,
 }

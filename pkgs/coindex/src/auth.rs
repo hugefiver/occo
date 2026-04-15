@@ -52,53 +52,62 @@ pub async fn auth_status() -> Result<()> {
     Ok(())
 }
 
-fn auth_file_path() -> Result<PathBuf> {
-    if cfg!(target_os = "windows") {
-        let app_data = std::env::var("APPDATA").context("APPDATA is not set")?;
-        return Ok(PathBuf::from(app_data).join("opencode").join("auth.json"));
-    }
-
+fn auth_file_candidates() -> Result<Vec<PathBuf>> {
     let home = dirs::home_dir().context("failed to resolve home directory")?;
+    let mut candidates = Vec::new();
 
-    if cfg!(target_os = "macos") {
-        return Ok(home
-            .join("Library")
-            .join("Application Support")
-            .join("opencode")
-            .join("auth.json"));
-    }
-
-    if cfg!(unix) {
-        return Ok(home
-            .join(".local")
+    // XDG-style (OpenCode actually uses this on all platforms)
+    candidates.push(
+        home.join(".local")
             .join("share")
             .join("opencode")
-            .join("auth.json"));
+            .join("auth.json"),
+    );
+
+    if cfg!(target_os = "windows") {
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            candidates.push(PathBuf::from(app_data).join("opencode").join("auth.json"));
+        }
+    } else if cfg!(target_os = "macos") {
+        candidates.push(
+            home.join("Library")
+                .join("Application Support")
+                .join("opencode")
+                .join("auth.json"),
+        );
     }
 
-    Err(anyhow!("unsupported platform"))
+    Ok(candidates)
 }
 
 fn read_opencode_token() -> Result<Option<String>> {
-    let path = auth_file_path()?;
-    if !path.exists() {
-        return Ok(None);
+    let candidates = auth_file_candidates()?;
+    for path in &candidates {
+        if !path.exists() {
+            continue;
+        }
+
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let parsed: AuthFile = match serde_json::from_str(&raw) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if let Some(token) = parsed
+            .occo
+            .and_then(|o| o.refresh)
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        {
+            info!("found token at {}", path.display());
+            return Ok(Some(token));
+        }
     }
 
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read auth file at {}", path.display()))?;
-    let parsed: AuthFile = serde_json::from_str(&raw).with_context(|| {
-        format!(
-            "failed to parse opencode auth file JSON at {}",
-            path.display()
-        )
-    })?;
-
-    Ok(parsed
-        .occo
-        .and_then(|o| o.refresh)
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty()))
+    Ok(None)
 }
 
 async fn device_flow_token() -> Result<String> {

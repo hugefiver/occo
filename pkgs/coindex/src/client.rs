@@ -8,7 +8,7 @@ use reqwest::header::{
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::types::{
     BatchRequest, BatchResponse, CreateIngestRequest, CreateIngestResponse, DeleteFilesetRequest,
@@ -38,14 +38,15 @@ impl IngestClient {
         headers.insert(AUTHORIZATION, auth);
         headers.insert(
             "X-Client-Application",
-            HeaderValue::from_static("vscode/1.100.0"),
+            HeaderValue::from_static("vscode/1.115.0"),
         );
         headers.insert(
             "X-Client-Source",
-            HeaderValue::from_static("copilot-chat/0.44.0"),
+            HeaderValue::from_static("copilot-chat/0.43.0"),
         );
 
         let http = reqwest::Client::builder()
+            .user_agent("vscode/1.115.0")
             .default_headers(headers)
             .build()
             .context("failed to build HTTP client")?;
@@ -57,6 +58,17 @@ impl IngestClient {
         let url = self.url("/external/code/ingest");
         let mut conflict_retries = 0u32;
         let mut attempts = 0u32;
+
+        debug!(
+            fileset = %req.fileset_name,
+            checkpoint = %req.new_checkpoint,
+            geo_filter_len = req.geo_filter.len(),
+            coded_symbols_count = req.coded_symbols.len(),
+            "create_ingest request"
+        );
+        if let Ok(body) = serde_json::to_string(&req) {
+            debug!(body = %body, "create_ingest body");
+        }
 
         loop {
             attempts += 1;

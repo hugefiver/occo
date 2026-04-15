@@ -18,13 +18,13 @@
 | v0.40.0   | ^1.111.0     | capabilities 动态化（supportsAdaptiveThinking 等从 modelMetadata 获取），Gemini function calling mode 实验                                                                                                                                                                                                                                    |
 | v0.41.0   | ^1.111.0     | Messages API 思维控制从 `!disableThinking` 改为 `enableThinking`（正向控制），新增 `forceExtendedThinking` 实验，Responses API effort 来源从实验配置改为 `options.reasoningEffort`                                                                                                                                                            |
 | v0.41.1/2 | ^1.111.0     | 与 v0.41.0 所有关键文件（networking.ts, chatEndpoint.ts, messagesApi.ts, responsesApi.ts）**完全一致**                                                                                                                                                                                                                                        |
-| v0.42.x   | ^1.111.0     | IEndpointBody 新增 `prompt_cache_key` 字段，Responses API 支持 prompt 缓存（`ResponsesApiPromptCacheKeyEnabled` 实验），effort 默认值改为 `'medium'`                                                                                                                                                                                          |
+| v0.42.x   | ^1.111.0     | IEndpointBody 新增 `prompt_cache_key` 字段，Responses API 支持 prompt 缓存（`ResponsesApiPromptCacheKeyEnabled` 实验），effort 默认值改为 `'medium'`。chatEndpoint.ts `customizeCapiBody()` 中 Claude thinking_budget 逻辑移除（仅剩 Gemini function calling mode），思维预算迁移至 anthropicProvider.ts（BYOK 路径）                                |
 | v0.42.3   | ^1.111.0     | **极小版本**：仅 revert transcript 行数 compaction summary（#4811 revert, commit a5754d89）+ version bump（commit 4d978fcb）。共 5 文件变更，API/Header/Body 行为与 v0.42.0 完全一致                                                                                                                                                          |
 | v0.43.0   | ^1.115.0     | **`forceExtendedThinking` 全面移除**（#4966）。WebSocket 改为按会话复用连接（#4827，去掉 turnId 参数）。内联摘要（inline summarization, #4956）。effort guard 改为 `supportsReasoningEffort?.length`。`AnthropicPromptOptimization` 移除，Claude 4.6 优化提示成为默认（#4941）。OTel 增强。Chat replay 移除（#4879）。Anthropic SDK 0.81→0.82 |
 | v0.44.0   | ^1.115.0     | 仅 1 commit（#4916）：Subagent 遥测增强（`parentToolCallId`、`requestId`、`parentChatSessionId`、`debugLogLabel` 传播至 OTel），`headerRequestId` fallback 逻辑，autopilot retry 消息区分模式                                                                                                                                                 |
-| main      | ^1.115.0     | 即 v0.44.0。chatEndpoint.ts 的 thinking 逻辑已从 `customizeCapiBody()` 移出（仅剩 Gemini function calling mode），思维预算逻辑迁移至 anthropicProvider.ts（BYOK 路径）。X-Initiator 确认仍存在于 chatMLFetcher.ts line ~1340                                                                                                                  |
+| main      | ^1.115.0     | 即 v0.44.0。X-Initiator 确认仍存在于 chatMLFetcher.ts line ~1304                                                                                                                                                                                                                                                                              |
 
-> **X-Initiator 全版本确认**：通过 grep.app 搜索 main 分支确认，`X-Initiator` 从 v0.36.0 到 main 一直存在于 chatMLFetcher.ts 的 additionalHeaders 中（line ~1304），**从未被移除**。在 HTTP 路径中，additionalHeaders 通过展开运算符 `...additionalHeaders` 传入 networking.ts `postRequest()` (L380-385)，因此 **HTTP 路径始终包含 X-Initiator**。WebSocket 路径的 X-Initiator 信息则通过 WS message body 中的 `initiator` 字段传递（chatWebSocketManager.ts L573），**不在 WS header 中**。
+> **X-Initiator 全版本确认**：通过 grep.app 搜索 main 分支确认，`X-Initiator` 从 v0.36.0 到 main 一直存在于 chatMLFetcher.ts 的 additionalHeaders 中（line ~1304），**从未被移除**。在 HTTP 路径中，additionalHeaders 通过展开运算符 `...additionalHeaders` 传入 networking.ts `postRequest()` (L380-385)，因此 **HTTP 路径始终包含 X-Initiator**。WebSocket 路径：v0.38.x ~ v0.40.x 的 WS header 中包含 X-Initiator；**v0.41.0+ WS header 不再包含 X-Initiator**，改为通过 WS message body 中的 `initiator` 字段传递（chatWebSocketManager.ts L573）。
 
 ## 二、HTTP Headers 详细分析
 
@@ -60,14 +60,14 @@ const additionalHeaders = {
 if (vision) additionalHeaders["Copilot-Vision-Request"] = "true";
 ```
 
-**HeaderContributor — 通过 baseFetchFetcher.ts 注入：**
+**HeaderContributor — 通过 envService.ts (L138-142) 和 fetcherServiceImpl.ts (L131-136) 注入：**
 
 - `User-Agent: GitHubCopilotChat/${version}`
 - `Editor-Version: vscode/${vsCodeVersion}`
 - `Editor-Plugin-Version: copilot-chat/${version}`
 - `Copilot-Integration-Id: vscode-chat`
 
-### 2.2 locationToIntent 映射（所有版本一致）
+### 2.2 locationToIntent 映射
 
 ```typescript
 Panel           → 'conversation-panel'      // 侧边栏聊天，无工具
@@ -77,8 +77,8 @@ EditingSession  → 'conversation-edits'      // Copilot Edits（多文件编辑
 Terminal        → 'conversation-terminal'
 Notebook        → 'conversation-notebook'
 Other           → 'conversation-other'
-ResponsesProxy  → 'responses-proxy'
-MessagesProxy   → 'messages-proxy'
+ResponsesProxy  → 'responses-proxy'         // v0.37.0+ 新增
+MessagesProxy   → 'messages-proxy'          // v0.37.0+ 新增
 ```
 
 OpenAI-Intent **始终**来自此映射。X-Interaction-Type 在不同版本中行为不同：
@@ -124,14 +124,14 @@ const agentInteractionType =
 **toolCallingLoop.ts（主路径）：**
 
 ```typescript
+// toolCallingLoop.ts L1259-1263
 userInitiatedRequest: (iterationNumber === 0 &&
   !isContinuation &&
-  !this.options.request.subAgentInvocationId &&
-  !this.options.request.isSystemInitiated) ||
+  !this.options.request.subAgentInvocationId) ||
   this.stopHookUserInitiated;
 ```
 
-含义：首次迭代 + 非续接 + 非子Agent调用 + 非系统发起 → user；工具调用后续轮次 → agent。`stopHookUserInitiated` 可覆盖（stop hook 触发时强制 user）
+含义：首次迭代 + 非续接 + 非子Agent调用 → user；工具调用后续轮次 → agent。`stopHookUserInitiated` 可覆盖（stop hook 触发时强制 user）
 
 **subagent 的特殊行为**：由于 `subAgentInvocationId` 存在，subagent 的 `userInitiatedRequest` **始终为 false**，即 `X-Initiator` 永远是 `agent`。
 
@@ -190,7 +190,7 @@ protected override async fetch(opts: ToolCallingLoopFetchOptions, token: Cancell
 
 `this.options.request.subAgentInvocationId` 在 loop 创建时设置，不会改变。`fetch()` 每次迭代都会被调用，因此 subagent 的**所有请求**都携带 `{ kind: 'subagent' }`。
 
-同样，`searchSubagentToolCallingLoop.ts` 直接硬编码 `userInitiatedRequest: false` 和 `requestKindOptions: { kind: 'subagent' }`。`executionSubagentToolCallingLoop.ts` 仅硬编码 `userInitiatedRequest: false`，**不传** `requestKindOptions`（依赖上层 defaultIntentRequestHandler 的传递）。
+同样，`searchSubagentToolCallingLoop.ts` 直接硬编码 `userInitiatedRequest: false` 和 `requestKindOptions: { kind: 'subagent' }`。`executionSubagentToolCallingLoop.ts` 仅硬编码 `userInitiatedRequest: false`，**不传** `requestKindOptions`，因此其 `X-Interaction-Type` 退化为 intent 值（非 `conversation-subagent`）。
 
 **完整的 intent 分配矩阵：**
 
