@@ -522,13 +522,13 @@ export async function OccoAuthPlugin({ client }) {
               };
             }
 
-            // Server-side context editing: prune stale tool results and
-            // old thinking blocks to keep long conversations within limits.
-            // User can override via options.contextManagement or set to false to disable.
+            // Match Copilot Chat 0.38.x: context editing is opt-in for
+            // Anthropic Messages API requests, not enabled by default.
+            // Keep `true` as a shorthand for OCCO's default edit set.
             if (model.options.contextManagement === false) {
               delete model.options.contextManagement;
-            } else {
-              model.options.contextManagement ??= {
+            } else if (model.options.contextManagement === true) {
+              model.options.contextManagement = {
                 edits: [
                   { type: "clear_thinking_20251015" },
                   { type: "clear_tool_uses_20250919" },
@@ -659,12 +659,17 @@ export async function OccoAuthPlugin({ client }) {
               headers["Copilot-Vision-Request"] = "true";
             }
 
-            // Add anthropic-beta headers for Messages API
+            // Add anthropic-beta headers for Messages API.
+            // Match Copilot Chat 0.38.x by only advertising context
+            // management when the outgoing body actually includes it.
             if (url.includes("/v1/messages")) {
-              const betas = [
-                "context-management-2025-06-27",
-                "advanced-tool-use-2025-11-20",
-              ];
+              const betas = ["advanced-tool-use-2025-11-20"];
+              if (
+                parsedBody?.context_management ||
+                parsedBody?.contextManagement
+              ) {
+                betas.unshift("context-management-2025-06-27");
+              }
               // Interleaved thinking only for non-adaptive thinking
               // (adaptive handles it natively; absent = user disabled)
               if (parsedBody?.thinking?.type === "enabled") {
