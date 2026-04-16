@@ -1,11 +1,21 @@
 //! Blackbird WASM embedding for GeoFilter and createCodedSymbols.
 //! getDocSha is implemented in pure Rust (reverse-engineered algorithm).
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail};
 use sha1::{Digest, Sha1};
 use wasmtime::*;
 
 static WASM_BYTES: &[u8] = include_bytes!("../wasm/external_ingest_utils_bg.wasm");
+
+/// Bridge wasmtime::Error (no StdError impl in v43+) into anyhow.
+trait WtResult<T> {
+    fn wt(self) -> anyhow::Result<T>;
+}
+impl<T> WtResult<T> for std::result::Result<T, wasmtime::Error> {
+    fn wt(self) -> anyhow::Result<T> {
+        self.map_err(|e| anyhow!("{e}"))
+    }
+}
 
 /// Host-side representation of JavaScript values passing through the externref boundary.
 #[derive(Clone, Debug)]
@@ -50,13 +60,24 @@ pub struct BlackbirdWasm {
 }
 
 impl BlackbirdWasm {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let mut config = Config::new();
         config.wasm_reference_types(true);
         config.wasm_multi_value(true);
 
-        let engine = Engine::new(&config)?;
-        let module = Module::new(&engine, WASM_BYTES)?;
+        let engine = Engine::new(&config).wt()?;
+
+        // Cranelift compilation in wasmtime 43+ uses significantly more stack
+        // in debug builds. Spawn on a thread with 8 MB stack to avoid overflow.
+        let engine_clone = engine.clone();
+        let module = std::thread::Builder::new()
+            .name("wasm-compile".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || Module::new(&engine_clone, WASM_BYTES))
+            .map_err(|e| anyhow!("failed to spawn compile thread: {e}"))?
+            .join()
+            .map_err(|_| anyhow!("compile thread panicked"))?
+            .wt()?;
 
         let mut store = Store::new(
             &engine,
@@ -67,9 +88,9 @@ impl BlackbirdWasm {
         );
 
         let mut linker = Linker::new(&engine);
-        Self::register_imports(&mut linker)?;
+        Self::register_imports(&mut linker).wt()?;
 
-        let instance = linker.instantiate(&mut store, &module)?;
+        let instance = linker.instantiate(&mut store, &module).wt()?;
 
         // Capture memory and externref table from exports.
         let memory = instance
@@ -84,8 +105,10 @@ impl BlackbirdWasm {
         store.data_mut().table = Some(table);
 
         // Initialize wasm-bindgen runtime (sets up externref table sentinel values).
-        let start = instance.get_typed_func::<(), ()>(&mut store, "__wbindgen_start")?;
-        start.call(&mut store, ())?;
+        let start = instance
+            .get_typed_func::<(), ()>(&mut store, "__wbindgen_start")
+            .wt()?;
+        start.call(&mut store, ()).wt()?;
 
         Ok(Self { store, instance })
     }
@@ -221,7 +244,7 @@ impl BlackbirdWasm {
                 let memory = caller.data().memory.unwrap();
                 let data = &memory.data(&caller)[ptr as usize..(ptr + len) as usize];
                 let msg = String::from_utf8_lossy(data).to_string();
-                Err(anyhow!("WASM throw: {msg}"))
+                Err(Error::msg(format!("WASM throw: {msg}")))
             }
         })?;
 
@@ -244,7 +267,7 @@ impl BlackbirdWasm {
                 let table = caller
                     .data()
                     .table
-                    .ok_or_else(|| anyhow!("table not yet set during init"))?;
+                    .ok_or_else(|| Error::msg("table not yet set during init"))?;
 
                 // Table starts at size 1. Grow by 4 → size 5.
                 let offset = table.grow(&mut caller, 4, Ref::Extern(None))?;
@@ -325,31 +348,35 @@ impl BlackbirdWasm {
 
     /// Compute the GeoFilter binary blob from a set of doc_shas.
     /// Returns raw bytes (caller should base64-encode for the API).
-    pub fn compute_geo_filter(&mut self, doc_shas: &[[u8; 20]]) -> Result<Vec<u8>> {
+    pub fn compute_geo_filter(&mut self, doc_shas: &[[u8; 20]]) -> anyhow::Result<Vec<u8>> {
         let gf_new = self
             .instance
-            .get_typed_func::<(), i32>(&mut self.store, "geofilter_new")?;
+            .get_typed_func::<(), i32>(&mut self.store, "geofilter_new")
+            .wt()?;
         let gf_push = self
             .instance
-            .get_typed_func::<(i32, i32, i32), (i32, i32)>(&mut self.store, "geofilter_push")?;
+            .get_typed_func::<(i32, i32, i32), (i32, i32)>(&mut self.store, "geofilter_push")
+            .wt()?;
         let malloc = self
             .instance
-            .get_typed_func::<(i32, i32), i32>(&mut self.store, "__wbindgen_malloc")?;
+            .get_typed_func::<(i32, i32), i32>(&mut self.store, "__wbindgen_malloc")
+            .wt()?;
         let gf_to_bytes = self
             .instance
             .get_func(&mut self.store, "geofilter_toBytes")
             .ok_or_else(|| anyhow!("geofilter_toBytes not found"))?;
         let gf_free = self
             .instance
-            .get_typed_func::<(i32, i32), ()>(&mut self.store, "__wbg_geofilter_free")?;
+            .get_typed_func::<(i32, i32), ()>(&mut self.store, "__wbg_geofilter_free")
+            .wt()?;
 
         // Create new GeoFilter
-        let gf_ptr = gf_new.call(&mut self.store, ())?;
+        let gf_ptr = gf_new.call(&mut self.store, ()).wt()?;
 
         // Push each doc_sha
         for sha in doc_shas {
             // Allocate 20 bytes in WASM memory and copy the sha
-            let ptr = malloc.call(&mut self.store, (20, 1))?;
+            let ptr = malloc.call(&mut self.store, (20, 1)).wt()?;
             {
                 let memory = self.store.data().memory.unwrap();
                 memory.data_mut(&mut self.store)[ptr as usize..ptr as usize + 20]
@@ -357,20 +384,22 @@ impl BlackbirdWasm {
             }
 
             // geofilter_push takes ownership of the allocation
-            let (_err_idx, has_err) = gf_push.call(&mut self.store, (gf_ptr, ptr, 20))?;
+            let (_err_idx, has_err) = gf_push.call(&mut self.store, (gf_ptr, ptr, 20)).wt()?;
             if has_err != 0 {
-                gf_free.call(&mut self.store, (gf_ptr, 1))?;
+                gf_free.call(&mut self.store, (gf_ptr, 1)).wt()?;
                 bail!("geofilter_push failed");
             }
         }
 
         // Get bytes
         let mut results = [Val::ExternRef(None)];
-        gf_to_bytes.call(&mut self.store, &[Val::I32(gf_ptr)], &mut results)?;
+        gf_to_bytes
+            .call(&mut self.store, &[Val::I32(gf_ptr)], &mut results)
+            .wt()?;
         let bytes = self.extract_bytes_from_val(&results[0]);
 
         // Free GeoFilter
-        gf_free.call(&mut self.store, (gf_ptr, 1))?;
+        gf_free.call(&mut self.store, (gf_ptr, 1)).wt()?;
 
         Ok(bytes)
     }
@@ -385,38 +414,45 @@ impl BlackbirdWasm {
         doc_shas: &[[u8; 20]],
         range_start: u32,
         range_end: u32,
-    ) -> Result<Vec<Vec<u8>>> {
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
         let malloc = self
             .instance
-            .get_typed_func::<(i32, i32), i32>(&mut self.store, "__wbindgen_malloc")?;
+            .get_typed_func::<(i32, i32), i32>(&mut self.store, "__wbindgen_malloc")
+            .wt()?;
         let free = self
             .instance
-            .get_typed_func::<(i32, i32, i32), ()>(&mut self.store, "__wbindgen_free")?;
+            .get_typed_func::<(i32, i32, i32), ()>(&mut self.store, "__wbindgen_free")
+            .wt()?;
         let table_alloc = self
             .instance
-            .get_typed_func::<(), i32>(&mut self.store, "__externref_table_alloc")?;
+            .get_typed_func::<(), i32>(&mut self.store, "__externref_table_alloc")
+            .wt()?;
         let drop_slice = self
             .instance
-            .get_typed_func::<(i32, i32), ()>(&mut self.store, "__externref_drop_slice")?;
+            .get_typed_func::<(i32, i32), ()>(&mut self.store, "__externref_drop_slice")
+            .wt()?;
         let cs_fn = self
             .instance
             .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(
                 &mut self.store,
                 "createCodedSymbols",
-            )?;
+            )
+            .wt()?;
 
         let n = doc_shas.len();
 
         // passArrayJsValueToWasm0: allocate array of table indices in WASM memory
-        let arr_ptr = malloc.call(&mut self.store, (n as i32 * 4, 4))?;
+        let arr_ptr = malloc.call(&mut self.store, (n as i32 * 4, 4)).wt()?;
 
         for (i, sha) in doc_shas.iter().enumerate() {
             // Allocate table slot and store Uint8Array externref
-            let idx = table_alloc.call(&mut self.store, ())?;
-            let ext = ExternRef::new(&mut self.store, JsValue::Bytes(sha.to_vec()))?;
+            let idx = table_alloc.call(&mut self.store, ()).wt()?;
+            let ext = ExternRef::new(&mut self.store, JsValue::Bytes(sha.to_vec())).wt()?;
 
             let table = self.store.data().table.unwrap();
-            table.set(&mut self.store, idx as u64, Ref::Extern(Some(ext)))?;
+            table
+                .set(&mut self.store, idx as u64, Ref::Extern(Some(ext)))
+                .wt()?;
 
             // Write table index as u32le into WASM memory
             let memory = self.store.data().memory.unwrap();
@@ -426,10 +462,12 @@ impl BlackbirdWasm {
         }
 
         // Call createCodedSymbols(arr_ptr, n, range_start, range_end)
-        let (r0, r1, r2, r3) = cs_fn.call(
-            &mut self.store,
-            (arr_ptr, n as i32, range_start as i32, range_end as i32),
-        )?;
+        let (r0, r1, r2, r3) = cs_fn
+            .call(
+                &mut self.store,
+                (arr_ptr, n as i32, range_start as i32, range_end as i32),
+            )
+            .wt()?;
 
         if r3 != 0 {
             // r2 is an error table index; just report failure
@@ -460,8 +498,8 @@ impl BlackbirdWasm {
         }
 
         // Cleanup: deallocate result table slots, then free the memory
-        drop_slice.call(&mut self.store, (r0, r1))?;
-        free.call(&mut self.store, (r0, r1 * 4, 4))?;
+        drop_slice.call(&mut self.store, (r0, r1)).wt()?;
+        free.call(&mut self.store, (r0, r1 * 4, 4)).wt()?;
 
         Ok(coded)
     }
