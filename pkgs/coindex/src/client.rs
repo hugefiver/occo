@@ -2,13 +2,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures::stream::{FuturesUnordered, StreamExt};
-use reqwest::header::{
-    AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER,
-};
 use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
-use tracing::{debug, warn};
+use serde::de::DeserializeOwned;
+use tracing::debug;
 
 use crate::types::{
     BatchRequest, BatchResponse, CreateIngestRequest, CreateIngestResponse, DeleteFilesetRequest,
@@ -163,8 +161,10 @@ impl IngestClient {
                 Ok(resp) => resp,
                 Err(err) => {
                     if server_retries >= 3 {
-                        warn!("upload_document network error swallowed after retries: {err}");
-                        return Ok(());
+                        return Err(anyhow!(
+                            "upload_document network error after {} retries: {err}",
+                            server_retries
+                        ));
                     }
                     server_retries += 1;
                     let backoff = 1u64 << server_retries;
@@ -186,8 +186,10 @@ impl IngestClient {
 
             if status == StatusCode::TOO_MANY_REQUESTS {
                 if throttled_retries >= 10 {
-                    warn!("upload_document swallowed after 429 retries exhausted");
-                    return Ok(());
+                    return Err(anyhow!(
+                        "upload_document failed: 429 retries exhausted for doc {}",
+                        req.doc_id
+                    ));
                 }
                 throttled_retries += 1;
                 let wait = retry_after_secs(response.headers()).unwrap_or(1);
@@ -198,8 +200,9 @@ impl IngestClient {
             if status.is_server_error() {
                 if server_retries >= 3 {
                     let body = response_text(response).await;
-                    warn!("upload_document swallowed after 5xx retries exhausted: {body}");
-                    return Ok(());
+                    return Err(anyhow!(
+                        "upload_document failed after 5xx retries: {status} {body}"
+                    ));
                 }
                 server_retries += 1;
                 let wait = retry_after_secs(response.headers()).unwrap_or(1u64 << server_retries);
@@ -208,8 +211,9 @@ impl IngestClient {
             }
 
             let body = response_text(response).await;
-            warn!("upload_document swallowed unexpected status {status}: {body}");
-            return Ok(());
+            return Err(anyhow!(
+                "upload_document unexpected status {status}: {body}"
+            ));
         }
     }
 
@@ -238,7 +242,8 @@ impl IngestClient {
 
     pub async fn finalize(&self, req: FinalizeRequest) -> Result<()> {
         let url = self.url("/external/code/ingest/finalize");
-        self.post_empty_with_rate_limit(&url, &req, "finalize").await
+        self.post_empty_with_rate_limit(&url, &req, "finalize")
+            .await
     }
 
     pub async fn list_filesets(&self) -> Result<ListFilesetsResponse> {
@@ -266,11 +271,11 @@ impl IngestClient {
                 return Ok(payload);
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                if let Some(wait) = retry_after_secs(response.headers()) {
-                    tokio::time::sleep(Duration::from_secs(wait)).await;
-                    continue;
-                }
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && let Some(wait) = retry_after_secs(response.headers())
+            {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
             }
 
             let body = response_text(response).await;
@@ -300,11 +305,11 @@ impl IngestClient {
                 return Ok(());
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                if let Some(wait) = retry_after_secs(response.headers()) {
-                    tokio::time::sleep(Duration::from_secs(wait)).await;
-                    continue;
-                }
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && let Some(wait) = retry_after_secs(response.headers())
+            {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
             }
 
             let body = response_text(response).await;
@@ -357,11 +362,11 @@ impl IngestClient {
                 return Ok(value);
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                if let Some(wait) = retry_after_secs(response.headers()) {
-                    tokio::time::sleep(Duration::from_secs(wait)).await;
-                    continue;
-                }
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && let Some(wait) = retry_after_secs(response.headers())
+            {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
             }
 
             let body = response_text(response).await;
@@ -398,11 +403,11 @@ impl IngestClient {
                 return Ok(());
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                if let Some(wait) = retry_after_secs(response.headers()) {
-                    tokio::time::sleep(Duration::from_secs(wait)).await;
-                    continue;
-                }
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && let Some(wait) = retry_after_secs(response.headers())
+            {
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
             }
 
             let body = response_text(response).await;
@@ -419,8 +424,5 @@ fn retry_after_secs(headers: &HeaderMap) -> Option<u64> {
 }
 
 async fn response_text(response: reqwest::Response) -> String {
-    match response.text().await {
-        Ok(body) => body,
-        Err(_) => String::new(),
-    }
+    response.text().await.unwrap_or_default()
 }

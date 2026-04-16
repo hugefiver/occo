@@ -1,7 +1,7 @@
 //! Blackbird WASM embedding for GeoFilter and createCodedSymbols.
 //! getDocSha is implemented in pure Rust (reverse-engineered algorithm).
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use sha1::{Digest, Sha1};
 use wasmtime::*;
 
@@ -9,6 +9,7 @@ static WASM_BYTES: &[u8] = include_bytes!("../wasm/external_ingest_utils_bg.wasm
 
 /// Host-side representation of JavaScript values passing through the externref boundary.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum JsValue {
     Bytes(Vec<u8>),
     String(String),
@@ -149,10 +150,10 @@ impl BlackbirdWasm {
         // 4: (externref) -> i32 — .length
         linker.func_wrap(m, "__wbg_length_6bb7e81f9d7713e4", {
             |caller: Caller<'_, WasmState>, arg0: Option<Rooted<ExternRef>>| -> Result<i32> {
-                if let Some(ref ext) = arg0 {
-                    if let Some(js) = ext.data(&caller)?.and_then(|d| d.downcast_ref::<JsValue>()) {
-                        return Ok(js.len());
-                    }
+                if let Some(ref ext) = arg0
+                    && let Some(js) = ext.data(&caller)?.and_then(|d| d.downcast_ref::<JsValue>())
+                {
+                    return Ok(js.len());
                 }
                 Ok(0)
             }
@@ -446,15 +447,13 @@ impl BlackbirdWasm {
                 idx_bytes.copy_from_slice(&memory.data(&self.store)[offset..offset + 4]);
                 let idx = u32::from_le_bytes(idx_bytes);
 
-                if let Some(Ref::Extern(Some(ext))) = table.get(&mut self.store, idx as u64) {
-                    if let Ok(Some(data)) = ext.data(&self.store) {
-                        if let Some(js) = data.downcast_ref::<JsValue>() {
-                            if let Some(b) = js.as_bytes() {
-                                coded.push(b.to_vec());
-                                continue;
-                            }
-                        }
-                    }
+                if let Some(Ref::Extern(Some(ext))) = table.get(&mut self.store, idx as u64)
+                    && let Ok(Some(data)) = ext.data(&self.store)
+                    && let Some(js) = data.downcast_ref::<JsValue>()
+                    && let Some(b) = js.as_bytes()
+                {
+                    coded.push(b.to_vec());
+                    continue;
                 }
                 coded.push(Vec::new());
             }
@@ -471,14 +470,12 @@ impl BlackbirdWasm {
 
     /// Extract byte data from a Val::ExternRef containing JsValue::Bytes.
     fn extract_bytes_from_val(&self, val: &Val) -> Vec<u8> {
-        if let Val::ExternRef(Some(ext)) = val {
-            if let Ok(Some(data)) = ext.data(&self.store) {
-                if let Some(js) = data.downcast_ref::<JsValue>() {
-                    if let Some(b) = js.as_bytes() {
-                        return b.to_vec();
-                    }
-                }
-            }
+        if let Val::ExternRef(Some(ext)) = val
+            && let Ok(Some(data)) = ext.data(&self.store)
+            && let Some(js) = data.downcast_ref::<JsValue>()
+            && let Some(b) = js.as_bytes()
+        {
+            return b.to_vec();
         }
         Vec::new()
     }

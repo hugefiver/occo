@@ -64,7 +64,7 @@ pub fn can_ingest(path: &Path, size: u64) -> bool {
         .any(|segment| {
             segment.starts_with('.')
                 || SKIP_DIRS.contains(&segment)
-                || segment == ""
+                || segment.is_empty()
                 || segment == "."
                 || segment == ".."
         })
@@ -72,10 +72,10 @@ pub fn can_ingest(path: &Path, size: u64) -> bool {
         return false;
     }
 
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if BINARY_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
-            return false;
-        }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && BINARY_EXTS.contains(&ext.to_ascii_lowercase().as_str())
+    {
+        return false;
     }
 
     true

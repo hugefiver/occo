@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
@@ -34,22 +34,64 @@ struct AccessTokenResponse {
     interval: Option<u64>,
 }
 
-pub async fn get_token() -> Result<String> {
+#[derive(Debug, Serialize)]
+pub struct AuthInfo {
+    pub authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CoindexAuthFile {
+    refresh: String,
+}
+
+pub async fn get_token(interactive: bool) -> Result<String> {
+    if let Some(token) = read_coindex_token()? {
+        return Ok(token);
+    }
+
     if let Some(token) = read_opencode_token()? {
         return Ok(token);
     }
 
-    device_flow_token().await
-}
-
-pub async fn auth_status() -> Result<()> {
-    if read_opencode_token()?.is_some() {
-        println!("auth: opencode token (auth.json)");
-        return Ok(());
+    if !interactive {
+        bail!("not authenticated; run `coindex auth` to set up");
     }
 
-    println!("auth: opencode token not found, device flow required");
-    Ok(())
+    let token = device_flow_token().await?;
+    save_coindex_token(&token)?;
+    Ok(token)
+}
+
+pub async fn run_auth(interactive: bool) -> Result<AuthInfo> {
+    if read_coindex_token()?.is_some() {
+        return Ok(AuthInfo {
+            authenticated: true,
+            source: Some("coindex".to_string()),
+        });
+    }
+
+    if read_opencode_token()?.is_some() {
+        return Ok(AuthInfo {
+            authenticated: true,
+            source: Some("opencode".to_string()),
+        });
+    }
+
+    if !interactive {
+        return Ok(AuthInfo {
+            authenticated: false,
+            source: None,
+        });
+    }
+
+    let token = device_flow_token().await?;
+    save_coindex_token(&token)?;
+    Ok(AuthInfo {
+        authenticated: true,
+        source: Some("coindex (new)".to_string()),
+    })
 }
 
 fn auth_file_candidates() -> Result<Vec<PathBuf>> {
@@ -78,6 +120,47 @@ fn auth_file_candidates() -> Result<Vec<PathBuf>> {
     }
 
     Ok(candidates)
+}
+
+fn coindex_auth_file() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("failed to resolve home directory")?;
+    Ok(home
+        .join(".local")
+        .join("share")
+        .join("coindex")
+        .join("auth.json"))
+}
+
+fn read_coindex_token() -> Result<Option<String>> {
+    let path = coindex_auth_file()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed: CoindexAuthFile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let token = parsed.refresh.trim().to_string();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    info!("found token at {}", path.display());
+    Ok(Some(token))
+}
+
+fn save_coindex_token(token: &str) -> Result<()> {
+    let path = coindex_auth_file()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let data = CoindexAuthFile {
+        refresh: token.to_string(),
+    };
+    let json = serde_json::to_string_pretty(&data)?;
+    std::fs::write(&path, &json).with_context(|| format!("failed to write {}", path.display()))?;
+    info!("saved token to {}", path.display());
+    Ok(())
 }
 
 fn read_opencode_token() -> Result<Option<String>> {
@@ -131,9 +214,10 @@ async fn device_flow_token() -> Result<String> {
         .await
         .context("failed to decode device code response")?;
 
-    println!(
-        "Open {} and enter code {}",
-        device.verification_uri, device.user_code
+    info!(
+        url = %device.verification_uri,
+        code = %device.user_code,
+        "open URL and enter the code"
     );
 
     let mut interval = device.interval.unwrap_or(5).max(1);

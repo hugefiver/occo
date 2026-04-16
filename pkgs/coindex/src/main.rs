@@ -1,32 +1,55 @@
 mod auth;
 mod client;
+mod daemon;
 mod diff;
 mod filter;
+mod output;
 mod types;
 mod wasm;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::auth::{auth_status, get_token};
+use crate::auth::{get_token, run_auth};
 use crate::client::IngestClient;
+use crate::output::OutputFormat;
 use crate::types::{
-    CreateIngestRequest, DeleteFilesetRequest, FinalizeRequest, SearchRequest, UploadDocumentRequest,
+    CreateIngestRequest, DeleteFilesetRequest, FinalizeRequest, SearchRequest,
+    UploadDocumentRequest,
 };
 use crate::wasm::BlackbirdWasm;
 
 #[derive(Parser)]
 #[command(name = "coindex", about = "GitHub Copilot External Ingest CLI")]
 struct Cli {
+    /// Output as JSON (suppresses log output)
+    #[arg(long, global = true)]
+    json: bool,
+    /// Output as Markdown (suppresses log output)
+    #[arg(long, alias = "markdown", global = true)]
+    md: bool,
     #[command(subcommand)]
     command: Commands,
+}
+
+impl Cli {
+    fn output_format(&self) -> OutputFormat {
+        if self.json {
+            OutputFormat::Json
+        } else if self.md {
+            OutputFormat::Markdown
+        } else {
+            OutputFormat::Plain
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -35,8 +58,20 @@ enum Commands {
     Index {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Git commit ref for incremental indexing (use `head` from previous run)
+        #[arg(long, alias = "checkpoint")]
+        since: Option<String>,
+        #[arg(long, help = "Index files even if they match .gitignore rules")]
+        no_ignore: bool,
+    },
+    #[command(about = "Watch for changes and auto-index")]
+    Daemon {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "30")]
+        interval: u64,
         #[arg(long)]
-        checkpoint: Option<String>,
+        no_ignore: bool,
     },
     #[command(about = "Search the semantic index")]
     Search {
@@ -49,42 +84,83 @@ enum Commands {
     #[command(about = "List indexed filesets and their status")]
     Status,
     #[command(about = "Delete a fileset")]
-    Delete {
-        fileset: String,
-    },
+    Delete { fileset: String },
     #[command(about = "Show authentication status")]
     Auth,
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    init_tracing()?;
+async fn main() {
     let cli = Cli::parse();
+    let format = cli.output_format();
+
+    if format == OutputFormat::Plain {
+        init_tracing();
+    }
+
+    if let Err(e) = run(cli, format).await {
+        output::print_error(&e, format);
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
+    let interactive = format == OutputFormat::Plain;
 
     match cli.command {
-        Commands::Index { path, checkpoint } => run_index(path, checkpoint).await,
+        Commands::Index {
+            path,
+            since,
+            no_ignore,
+        } => {
+            let token = get_token(interactive).await?;
+            let result = run_index_core(token, path, since, no_ignore).await?;
+            output::print_index(&result, format);
+        }
+        Commands::Daemon {
+            path,
+            interval,
+            no_ignore,
+        } => {
+            daemon::run_daemon(path, interval, no_ignore, interactive).await?;
+        }
         Commands::Search {
             query,
             fileset,
             limit,
-        } => run_search(query, fileset, limit).await,
-        Commands::Status => run_status().await,
-        Commands::Delete { fileset } => run_delete(fileset).await,
-        Commands::Auth => auth_status().await,
+        } => {
+            let token = get_token(interactive).await?;
+            let response = run_search(token, query, fileset, limit).await?;
+            output::print_search(&response, format);
+        }
+        Commands::Status => {
+            let token = get_token(interactive).await?;
+            let response = run_status(token).await?;
+            output::print_status(&response, format);
+        }
+        Commands::Delete { fileset } => {
+            let token = get_token(interactive).await?;
+            run_delete(token, &fileset).await?;
+            output::print_delete(&fileset, format);
+        }
+        Commands::Auth => {
+            let info = run_auth(interactive).await?;
+            output::print_auth(&info, format);
+        }
     }
+    Ok(())
 }
 
-fn init_tracing() -> Result<()> {
+fn init_tracing() {
     let filter = match EnvFilter::try_from_default_env() {
         Ok(value) => value,
         Err(_) => EnvFilter::new("info"),
     };
 
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter)
-        .try_init()
-        .map_err(|error| anyhow!("failed to initialize tracing: {error}"))?;
-    Ok(())
+        .try_init();
 }
 
 struct FileData {
@@ -93,10 +169,20 @@ struct FileData {
     doc_sha: [u8; 20],
 }
 
-fn collect_file_data(repo_root: &Path, files: Vec<PathBuf>) -> Vec<FileData> {
+fn collect_file_data(
+    repo_root: &Path,
+    files: Vec<PathBuf>,
+    ignored: &HashSet<String>,
+) -> Vec<FileData> {
     let mut result = Vec::new();
 
     for relative in files {
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        if ignored.contains(&normalized) {
+            tracing::debug!(path = %normalized, "skipped (gitignored)");
+            continue;
+        }
+
         let absolute = repo_root.join(&relative);
 
         let metadata = match std::fs::metadata(&absolute) {
@@ -140,10 +226,23 @@ fn collect_file_data(repo_root: &Path, files: Vec<PathBuf>) -> Vec<FileData> {
     result
 }
 
-async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
+pub struct IndexResult {
+    pub fileset_name: String,
+    pub api_checkpoint: String,
+    pub head: String,
+    pub files_indexed: usize,
+    pub files_uploaded: usize,
+    pub elapsed: std::time::Duration,
+}
+
+pub async fn run_index_core(
+    token: String,
+    path: PathBuf,
+    since: Option<String>,
+    no_ignore: bool,
+) -> Result<IndexResult> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let started = Instant::now();
-    let token = get_token().await?;
     let client = IngestClient::new(token)?;
 
     let repo_root = diff::get_repo_root(&path)?;
@@ -154,38 +253,49 @@ async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
         .ok_or_else(|| anyhow!("failed to derive fileset name from {}", repo_root.display()))?;
     let git_head = diff::get_current_head(&repo_root)?;
 
-    let candidates = match checkpoint.as_deref() {
+    let (candidates, has_deletions) = match since.as_deref() {
         Some(previous) => {
             let deleted = diff::get_deleted_files(&repo_root, previous, &git_head)?;
-            if !deleted.is_empty() {
+            let has_deletions = !deleted.is_empty();
+            if has_deletions {
                 info!(deleted = deleted.len(), "detected deleted files");
             }
-            diff::get_changed_files(&repo_root, previous, &git_head)?
+            let changed = diff::get_changed_files(&repo_root, previous, &git_head)?;
+            (changed, has_deletions)
         }
-        None => diff::get_all_tracked_files(&repo_root)?,
+        None => (diff::get_all_tracked_files(&repo_root)?, false),
     };
 
-    // Collect file data with doc_sha (pure Rust)
-    let file_data = collect_file_data(&repo_root, candidates);
+    let ignored = if no_ignore {
+        HashSet::new()
+    } else {
+        diff::check_ignored(&repo_root, &candidates)?
+    };
+
+    let file_data = collect_file_data(&repo_root, candidates, &ignored);
     let files_indexed = file_data.len();
     info!(files = files_indexed, "collected files for indexing");
 
-    if file_data.is_empty() {
-        println!("no files to index");
-        return Ok(());
+    if file_data.is_empty() && !has_deletions {
+        info!("no files to index");
+        return Ok(IndexResult {
+            fileset_name,
+            api_checkpoint: String::new(),
+            head: git_head,
+            files_indexed: 0,
+            files_uploaded: 0,
+            elapsed: started.elapsed(),
+        });
     }
 
-    // Compute doc_shas array
     let doc_shas: Vec<[u8; 20]> = file_data.iter().map(|f| f.doc_sha).collect();
 
-    // Checkpoint = SHA-1 of all docShas concatenated (matches VS Code client)
     let mut checkpoint_hasher = Sha1::new();
     for sha in &doc_shas {
         checkpoint_hasher.update(sha);
     }
     let new_checkpoint = b64.encode(checkpoint_hasher.finalize());
 
-    // Initialize WASM runtime for geo_filter + coded_symbols
     info!("initializing blackbird WASM runtime");
     let mut bb = BlackbirdWasm::new()?;
 
@@ -193,21 +303,21 @@ async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
         tracing::debug!(idx = i, sha = %hex::encode(sha), "doc_sha");
     }
 
-    // Compute geo_filter
     let geo_filter_bytes = bb.compute_geo_filter(&doc_shas)?;
     let geo_filter = b64.encode(&geo_filter_bytes);
     tracing::debug!(hex = %hex::encode(&geo_filter_bytes), "geo_filter raw");
     info!(bytes = geo_filter_bytes.len(), "computed geo_filter");
 
-    // Compute initial coded_symbols (range [0, 1))
     let initial_symbols = bb.create_coded_symbols(&doc_shas, 0, 1)?;
     let coded_symbols: Vec<String> = initial_symbols.iter().map(|s| b64.encode(s)).collect();
     for (i, s) in initial_symbols.iter().enumerate() {
         tracing::debug!(idx = i, hex = %hex::encode(s), "coded_symbol");
     }
-    info!(count = coded_symbols.len(), "computed initial coded_symbols");
+    info!(
+        count = coded_symbols.len(),
+        "computed initial coded_symbols"
+    );
 
-    // Create ingest
     let ingest = client
         .create_ingest(CreateIngestRequest {
             fileset_name: fileset_name.clone(),
@@ -221,14 +331,20 @@ async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
         && ingest.coded_symbol_range.start == 0
         && ingest.coded_symbol_range.end == 0
     {
-        println!("already indexed: {fileset_name} at {new_checkpoint}");
-        return Ok(());
+        info!(fileset = %fileset_name, checkpoint = %new_checkpoint, "already indexed");
+        return Ok(IndexResult {
+            fileset_name,
+            api_checkpoint: new_checkpoint,
+            head: git_head,
+            files_indexed,
+            files_uploaded: 0,
+            elapsed: started.elapsed(),
+        });
     }
 
     let ingest_id = ingest.ingest_id;
     info!(ingest_id = %ingest_id, "ingest created");
 
-    // Upload remaining coded_symbols in batches
     let mut next_range = Some(ingest.coded_symbol_range);
     while let Some(range) = next_range.take() {
         if range.start >= range.end {
@@ -236,7 +352,12 @@ async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
         }
         let symbols = bb.create_coded_symbols(&doc_shas, range.start as u32, range.end as u32)?;
         let encoded: Vec<String> = symbols.iter().map(|s| b64.encode(s)).collect();
-        info!(start = range.start, end = range.end, count = encoded.len(), "uploading coded_symbols");
+        info!(
+            start = range.start,
+            end = range.end,
+            count = encoded.len(),
+            "uploading coded_symbols"
+        );
 
         let resp = client
             .upload_symbols(crate::types::UploadSymbolsRequest {
@@ -249,13 +370,11 @@ async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
         next_range = resp.next_coded_symbol_range;
     }
 
-    // Build doc_id → FileData lookup (base64-encoded doc_sha)
     let doc_map: std::collections::HashMap<String, &FileData> = file_data
         .iter()
         .map(|f| (b64.encode(f.doc_sha), f))
         .collect();
 
-    // Fetch batches and upload documents
     let mut page_token = String::new();
     let mut uploaded = 0usize;
     loop {
@@ -276,7 +395,6 @@ async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
                     doc_id: doc_id.clone(),
                 });
             } else {
-                // Deletion marker: empty content + empty path
                 uploads.push(UploadDocumentRequest {
                     ingest_id: ingest_id.clone(),
                     content: String::new(),
@@ -296,109 +414,60 @@ async fn run_index(path: PathBuf, checkpoint: Option<String>) -> Result<()> {
     }
     info!(uploaded, "documents uploaded");
 
-    // Finalize
-    client
-        .finalize(FinalizeRequest {
-            ingest_id: ingest_id,
-        })
-        .await?;
+    client.finalize(FinalizeRequest { ingest_id }).await?;
 
-    println!(
-        "indexed {} files ({} uploaded) in {:?} (fileset: {}, checkpoint: {})",
-        files_indexed,
+    let elapsed = started.elapsed();
+    info!(
+        files = files_indexed,
         uploaded,
-        started.elapsed(),
-        fileset_name,
-        &new_checkpoint[..14],
+        ?elapsed,
+        fileset = %fileset_name,
+        checkpoint = &new_checkpoint[..new_checkpoint.len().min(14)],
+        "indexing complete"
     );
 
-    Ok(())
+    Ok(IndexResult {
+        fileset_name,
+        api_checkpoint: new_checkpoint,
+        head: git_head,
+        files_indexed,
+        files_uploaded: uploaded,
+        elapsed,
+    })
 }
 
 fn relative_to_api_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-async fn run_search(query: String, fileset: String, limit: u32) -> Result<()> {
-    let token = get_token().await?;
+async fn run_search(
+    token: String,
+    query: String,
+    fileset: String,
+    limit: u32,
+) -> Result<types::SearchResponse> {
     let client = IngestClient::new(token)?;
 
-    let response = client
+    client
         .search(SearchRequest {
             prompt: query,
             scoping_query: format!("fileset:{fileset}"),
             embedding_model: "metis-1024-I16-Binary".to_string(),
             limit,
         })
-        .await?;
-
-    if response.results.is_empty() {
-        println!("no results");
-        return Ok(());
-    }
-
-    for (index, result) in response.results.iter().enumerate() {
-        let lang = result
-            .location
-            .language
-            .as_ref()
-            .map(|l| l.name.as_str())
-            .unwrap_or("unknown");
-        println!(
-            "{}. {} [{}] ({:.4})",
-            index + 1,
-            result.location.path,
-            lang,
-            result.distance,
-        );
-        if let Some(ref lr) = result.chunk.line_range {
-            println!("   lines: {}-{}", lr.start, lr.end);
-        }
-
-        let text = result.chunk.text.replace('\n', " ");
-        let snippet = if text.len() > 200 {
-            format!("{}...", &text[..200])
-        } else {
-            text
-        };
-        println!("   {snippet}");
-    }
-
-    Ok(())
+        .await
 }
 
-async fn run_status() -> Result<()> {
-    let token = get_token().await?;
+async fn run_status(token: String) -> Result<types::ListFilesetsResponse> {
     let client = IngestClient::new(token)?;
-    let response = client.list_filesets().await?;
-
-    if response.filesets.is_empty() {
-        println!("no filesets");
-        return Ok(());
-    }
-
-    println!("{:<36} {:<14} {:<12}", "name", "checkpoint", "status");
-    for fileset in response.filesets {
-        let checkpoint = if fileset.checkpoint.len() > 14 {
-            fileset.checkpoint.chars().take(14).collect::<String>()
-        } else {
-            fileset.checkpoint
-        };
-        println!("{:<36} {:<14} {:<12}", fileset.name, checkpoint, fileset.status);
-    }
-    println!("max_filesets: {}", response.max_filesets);
-
-    Ok(())
+    client.list_filesets().await
 }
 
-async fn run_delete(fileset: String) -> Result<()> {
-    let token = get_token().await?;
+async fn run_delete(token: String, fileset: &str) -> Result<()> {
     let client = IngestClient::new(token)?;
     client
         .delete_fileset(DeleteFilesetRequest {
-            fileset_name: fileset.clone(),
+            fileset_name: fileset.to_string(),
         })
-        .await?;
-    println!("deleted fileset: {fileset}");
-    Ok(())
+        .await
 }

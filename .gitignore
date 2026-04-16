@@ -3,3 +3,4 @@ temp/
 /target
 /pkgs/*/target
 /result
+.sisyphus/
