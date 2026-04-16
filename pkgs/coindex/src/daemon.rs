@@ -13,6 +13,7 @@ pub async fn run_daemon(
     path: PathBuf,
     interval_secs: u64,
     no_ignore: bool,
+    dirty: bool,
     interactive: bool,
 ) -> Result<()> {
     let repo_root = diff::get_repo_root(&path)?;
@@ -82,7 +83,7 @@ pub async fn run_daemon(
             }
         };
 
-        match run_index_core(token, path.clone(), since, no_ignore).await {
+        match run_index_core(token, path.clone(), since, no_ignore, dirty).await {
             Ok(result) => {
                 last_head = Some(result.head);
                 last_tree_status = Some(current_tree);

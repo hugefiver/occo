@@ -76,6 +76,25 @@ pub fn get_working_tree_status(repo_path: &Path) -> Result<String> {
     run_git(repo_path, &["status", "--porcelain"])
 }
 
+/// Get all dirty (uncommitted) files: modified/staged relative to HEAD + untracked.
+/// Returns a deduplicated list of paths relative to the repo root.
+pub fn get_dirty_files(repo_path: &Path) -> Result<Vec<PathBuf>> {
+    let modified = run_git(repo_path, &["diff", "--name-only", "HEAD"])?;
+    let untracked = run_git(repo_path, &["ls-files", "--others", "--exclude-standard"])?;
+
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for p in lines_to_paths(&modified)
+        .into_iter()
+        .chain(lines_to_paths(&untracked))
+    {
+        if seen.insert(p.clone()) {
+            result.push(p);
+        }
+    }
+    Ok(result)
+}
+
 /// Check which paths are ignored by .gitignore rules.
 /// Uses `git check-ignore --stdin` for efficient batch checking.
 /// Returns the set of ignored paths as normalized forward-slash strings.

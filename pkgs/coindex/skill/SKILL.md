@@ -105,12 +105,15 @@ Token priority: coindex auth file (`~/.local/share/coindex/auth.json`) → OpenC
 ```shell
 coindex --json index [path]                  # full index
 coindex --json index [path] --since <SHA>    # incremental
+coindex --json index [path] --dirty          # include uncommitted & untracked files
 coindex --json index --no-ignore             # include gitignored files
 ```
 
 Returns `fileset_name`, `head`, `files_indexed`, `files_uploaded`, `elapsed_secs`.
 
 Save the `head` value — pass it as `--since` for future incremental runs. (`api_checkpoint` is internal, ignore it.)
+
+`--dirty` includes modified, staged, and untracked files from the working tree — useful when the user wants to search code they haven't committed yet. Without `--dirty`, only committed content is indexed. Can combine with `--since` or `--no-ignore`.
 
 Filtering: gitignored files excluded by default. Hardcoded filters always apply (lockfiles, binaries, dotfiles, `.min.js`, `.d.ts`, `.map`, >1MB).
 
@@ -123,10 +126,10 @@ coindex --json delete <FILESET_NAME>
 ### daemon ⚠️ Confirm first
 
 ```shell
-coindex daemon [path] [--interval <secs>] [--no-ignore]
+coindex daemon [path] [--interval <secs>] [--no-ignore] [--dirty]
 ```
 
-Polls git HEAD + working tree at interval. HEAD-only change → incremental; working tree change → full index. First run always full. Runs until killed.
+Polls git HEAD + working tree at interval. HEAD-only change → incremental; working tree change → full index. First run always full. Runs until killed. `--dirty` makes each cycle include uncommitted changes.
 
 ## Error Handling
 

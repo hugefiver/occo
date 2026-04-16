@@ -64,6 +64,11 @@ enum Commands {
         since: Option<String>,
         #[arg(long, help = "Index files even if they match .gitignore rules")]
         no_ignore: bool,
+        #[arg(
+            long,
+            help = "Include uncommitted working tree changes and untracked files"
+        )]
+        dirty: bool,
     },
     #[command(about = "Watch for changes and auto-index")]
     Daemon {
@@ -73,6 +78,11 @@ enum Commands {
         interval: u64,
         #[arg(long)]
         no_ignore: bool,
+        #[arg(
+            long,
+            help = "Include uncommitted working tree changes and untracked files"
+        )]
+        dirty: bool,
     },
     #[command(about = "Search the semantic index")]
     Search {
@@ -116,17 +126,19 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             path,
             since,
             no_ignore,
+            dirty,
         } => {
             let token = get_token(interactive).await?;
-            let result = run_index_core(token, path, since, no_ignore).await?;
+            let result = run_index_core(token, path, since, no_ignore, dirty).await?;
             output::print_index(&result, format);
         }
         Commands::Daemon {
             path,
             interval,
             no_ignore,
+            dirty,
         } => {
-            daemon::run_daemon(path, interval, no_ignore, interactive).await?;
+            daemon::run_daemon(path, interval, no_ignore, dirty, interactive).await?;
         }
         Commands::Search {
             query,
@@ -276,6 +288,7 @@ pub async fn run_index_core(
     path: PathBuf,
     since: Option<String>,
     no_ignore: bool,
+    dirty: bool,
 ) -> Result<IndexResult> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let started = Instant::now();
@@ -289,9 +302,16 @@ pub async fn run_index_core(
         .ok_or_else(|| anyhow!("failed to derive fileset name from {}", repo_root.display()))?;
     let git_head = diff::get_current_head(&repo_root)?;
 
+    let dirty_files = if dirty {
+        diff::get_dirty_files(&repo_root)?
+    } else {
+        Vec::new()
+    };
+
     let mut local_state = state::StateFile::load();
 
     if since.is_none()
+        && dirty_files.is_empty()
         && let Some(saved) = local_state.get(&fileset_name)
         && saved.head == git_head
     {
@@ -309,7 +329,7 @@ pub async fn run_index_core(
 
     let effective_since = since.or_else(|| local_state.get(&fileset_name).map(|s| s.head.clone()));
 
-    let (candidates, has_deletions) = match effective_since.as_deref() {
+    let (mut candidates, has_deletions) = match effective_since.as_deref() {
         Some(previous) => {
             let deleted = diff::get_deleted_files(&repo_root, previous, &git_head)?;
             let has_deletions = !deleted.is_empty();
@@ -321,6 +341,16 @@ pub async fn run_index_core(
         }
         None => (diff::get_all_tracked_files(&repo_root)?, false),
     };
+
+    if !dirty_files.is_empty() {
+        let existing: HashSet<PathBuf> = candidates.iter().cloned().collect();
+        for f in dirty_files {
+            if !existing.contains(&f) {
+                candidates.push(f);
+            }
+        }
+        info!(files = candidates.len(), "merged dirty working tree files");
+    }
 
     let ignored = if no_ignore {
         HashSet::new()
