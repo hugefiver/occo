@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 use crate::auth::get_token;
 use crate::diff;
 use crate::run_index_core;
+use crate::state;
 
 pub async fn run_daemon(
     path: PathBuf,
@@ -15,9 +16,18 @@ pub async fn run_daemon(
     interactive: bool,
 ) -> Result<()> {
     let repo_root = diff::get_repo_root(&path)?;
+    let fileset_name = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
     info!(root = %repo_root.display(), interval = interval_secs, "daemon started");
 
-    let mut last_head: Option<String> = None;
+    let saved = state::StateFile::load();
+    let mut last_head: Option<String> = saved.get(&fileset_name).map(|s| s.head.clone());
+    if let Some(head) = &last_head {
+        info!(head = %head, "resumed from saved state");
+    }
     let mut last_tree_status: Option<String> = None;
 
     loop {

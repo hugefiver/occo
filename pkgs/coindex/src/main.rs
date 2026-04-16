@@ -4,6 +4,7 @@ mod daemon;
 mod diff;
 mod filter;
 mod output;
+mod state;
 mod types;
 mod wasm;
 
@@ -82,7 +83,10 @@ enum Commands {
         limit: u32,
     },
     #[command(about = "List indexed filesets and their status")]
-    Status,
+    Status {
+        /// Path to a repository or subdirectory to check (omit to list all filesets)
+        path: Option<PathBuf>,
+    },
     #[command(about = "Delete a fileset")]
     Delete { fileset: String },
     #[command(about = "Show authentication status")]
@@ -133,14 +137,45 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             let response = run_search(token, query, fileset, limit).await?;
             output::print_search(&response, format);
         }
-        Commands::Status => {
+        Commands::Status { path } => {
             let token = get_token(interactive).await?;
-            let response = run_status(token).await?;
-            output::print_status(&response, format);
+            let response = run_status(token.clone()).await?;
+            match path {
+                Some(p) => {
+                    let repo_root = diff::get_repo_root(&p)?;
+                    let fileset_name = repo_root
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| {
+                            anyhow!("failed to derive fileset name from {}", repo_root.display())
+                        })?;
+                    let fileset = response
+                        .filesets
+                        .iter()
+                        .find(|f| f.name == fileset_name)
+                        .cloned();
+                    let local_state = state::StateFile::load();
+                    let local = local_state.get(&fileset_name);
+                    output::print_project_status(
+                        &repo_root,
+                        &fileset_name,
+                        fileset.as_ref(),
+                        local,
+                        format,
+                    );
+                }
+                None => {
+                    output::print_status(&response, format);
+                }
+            }
         }
         Commands::Delete { fileset } => {
             let token = get_token(interactive).await?;
             run_delete(token, &fileset).await?;
+            let mut local_state = state::StateFile::load();
+            local_state.remove(&fileset);
+            let _ = local_state.save();
             output::print_delete(&fileset, format);
         }
         Commands::Auth => {
@@ -233,6 +268,7 @@ pub struct IndexResult {
     pub files_indexed: usize,
     pub files_uploaded: usize,
     pub elapsed: std::time::Duration,
+    pub skipped: bool,
 }
 
 pub async fn run_index_core(
@@ -253,7 +289,27 @@ pub async fn run_index_core(
         .ok_or_else(|| anyhow!("failed to derive fileset name from {}", repo_root.display()))?;
     let git_head = diff::get_current_head(&repo_root)?;
 
-    let (candidates, has_deletions) = match since.as_deref() {
+    let mut local_state = state::StateFile::load();
+
+    if since.is_none()
+        && let Some(saved) = local_state.get(&fileset_name)
+        && saved.head == git_head
+    {
+        info!(fileset = %fileset_name, head = %git_head, "HEAD unchanged, skipping");
+        return Ok(IndexResult {
+            fileset_name,
+            api_checkpoint: saved.checkpoint.clone(),
+            head: git_head,
+            files_indexed: 0,
+            files_uploaded: 0,
+            elapsed: started.elapsed(),
+            skipped: true,
+        });
+    }
+
+    let effective_since = since.or_else(|| local_state.get(&fileset_name).map(|s| s.head.clone()));
+
+    let (candidates, has_deletions) = match effective_since.as_deref() {
         Some(previous) => {
             let deleted = diff::get_deleted_files(&repo_root, previous, &git_head)?;
             let has_deletions = !deleted.is_empty();
@@ -278,6 +334,14 @@ pub async fn run_index_core(
 
     if file_data.is_empty() && !has_deletions {
         info!("no files to index");
+        local_state.update(
+            &fileset_name,
+            &git_head,
+            "",
+            &repo_root.to_string_lossy(),
+            0,
+        );
+        let _ = local_state.save();
         return Ok(IndexResult {
             fileset_name,
             api_checkpoint: String::new(),
@@ -285,6 +349,7 @@ pub async fn run_index_core(
             files_indexed: 0,
             files_uploaded: 0,
             elapsed: started.elapsed(),
+            skipped: false,
         });
     }
 
@@ -332,6 +397,14 @@ pub async fn run_index_core(
         && ingest.coded_symbol_range.end == 0
     {
         info!(fileset = %fileset_name, checkpoint = %new_checkpoint, "already indexed");
+        local_state.update(
+            &fileset_name,
+            &git_head,
+            &new_checkpoint,
+            &repo_root.to_string_lossy(),
+            files_indexed,
+        );
+        let _ = local_state.save();
         return Ok(IndexResult {
             fileset_name,
             api_checkpoint: new_checkpoint,
@@ -339,6 +412,7 @@ pub async fn run_index_core(
             files_indexed,
             files_uploaded: 0,
             elapsed: started.elapsed(),
+            skipped: false,
         });
     }
 
@@ -426,6 +500,15 @@ pub async fn run_index_core(
         "indexing complete"
     );
 
+    local_state.update(
+        &fileset_name,
+        &git_head,
+        &new_checkpoint,
+        &repo_root.to_string_lossy(),
+        files_indexed,
+    );
+    let _ = local_state.save();
+
     Ok(IndexResult {
         fileset_name,
         api_checkpoint: new_checkpoint,
@@ -433,6 +516,7 @@ pub async fn run_index_core(
         files_indexed,
         files_uploaded: uploaded,
         elapsed,
+        skipped: false,
     })
 }
 

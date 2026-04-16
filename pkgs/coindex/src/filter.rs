@@ -13,6 +13,11 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     ".venv",
     "venv",
+    "tmp",
+    "temp",
+    "logs",
+    "coverage",
+    "cache",
 ];
 
 const BINARY_EXTS: &[&str] = &[
