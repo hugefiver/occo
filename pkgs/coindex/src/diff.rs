@@ -139,21 +139,27 @@ pub fn check_ignored(repo_path: &Path, paths: &[PathBuf]) -> Result<HashSet<Stri
         .spawn()
         .context("failed to spawn git check-ignore")?;
 
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .context("failed to open stdin for git check-ignore")?;
-        for path in paths {
-            writeln!(stdin, "{}", path.to_string_lossy().replace('\\', "/"))?;
+    let mut stdin = child.stdin.take().context("failed to open stdin")?;
+    let paths_owned: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    let writer = std::thread::spawn(move || -> Result<()> {
+        for p in &paths_owned {
+            writeln!(stdin, "{}", p)?;
         }
-    }
+        Ok(())
+    });
 
     let output = child
         .wait_with_output()
         .context("git check-ignore failed")?;
 
-    // Exit code: 0 = some paths matched, 1 = no paths matched, >1 = error
+    writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdin writer thread panicked"))??;
+
     match output.status.code() {
         Some(0) | Some(1) => {}
         _ => {

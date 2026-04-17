@@ -37,6 +37,8 @@ pub fn run_files(
     thorough: bool,
     tree: bool,
     depth: Option<usize>,
+    include_ignored: bool,
+    compact: bool,
     format: OutputFormat,
 ) -> Result<()> {
     let repo_root = diff::get_repo_root(&paths[0])?;
@@ -97,7 +99,20 @@ pub fn run_files(
             continue;
         }
 
+        if ignored.contains(&normalized) {
+            if !include_ignored {
+                continue;
+            }
+        }
+
         let status = classify_file(&repo_root, relative, &normalized, &ignored, &git_binaries);
+
+        if !include_ignored {
+            if matches!(status, FileStatus::Skipped(SkipReason::SkipDir)) {
+                continue;
+            }
+        }
+
         entries.push(FileEntry {
             path: normalized,
             status,
@@ -118,9 +133,9 @@ pub fn run_files(
     };
 
     if tree {
-        print_tree(&summary, depth, format);
+        print_tree(&summary, depth, compact, format);
     } else {
-        print_list(&summary, format);
+        print_list(&summary, compact, format);
     }
 
     Ok(())
@@ -167,7 +182,38 @@ fn classify_file(
     FileStatus::Included
 }
 
-fn print_list(summary: &FilesSummary, format: OutputFormat) {
+fn collect_display_entries(node: &TreeNode, prefix: &str, compact: bool) -> Vec<DisplayEntry> {
+    let mut result = Vec::new();
+    for (name, child) in &node.children_dirs {
+        let child_path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if compact && child.all_skipped() {
+            result.push(DisplayEntry::CollapsedDir {
+                path: child_path,
+                count: child.total_files(),
+            });
+        } else {
+            result.extend(collect_display_entries(child, &child_path, compact));
+        }
+    }
+    for (name, status) in &node.files {
+        let file_path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        result.push(DisplayEntry::File {
+            path: file_path,
+            status: status.clone(),
+        });
+    }
+    result
+}
+
+fn print_list(summary: &FilesSummary, compact: bool, format: OutputFormat) {
     match format {
         OutputFormat::Json => {
             println!(
@@ -176,25 +222,41 @@ fn print_list(summary: &FilesSummary, format: OutputFormat) {
             );
         }
         OutputFormat::Markdown => {
+            let tree = build_tree(&summary.files);
+            let display = collect_display_entries(&tree, "", compact);
             println!(
                 "## Files ({} included, {} skipped)\n",
                 summary.included, summary.skipped
             );
             println!("| Path | Status |");
             println!("|------|--------|");
-            for entry in &summary.files {
-                let status_str = match &entry.status {
-                    FileStatus::Included => "✓".to_string(),
-                    FileStatus::Skipped(r) => format!("✗ {r}"),
-                };
-                println!("| `{}` | {} |", entry.path, status_str);
+            for entry in &display {
+                match entry {
+                    DisplayEntry::File { path, status } => {
+                        let status_str = match status {
+                            FileStatus::Included => "✓".to_string(),
+                            FileStatus::Skipped(r) => format!("✗ {r}"),
+                        };
+                        println!("| `{path}` | {status_str} |");
+                    }
+                    DisplayEntry::CollapsedDir { path, count } => {
+                        println!("| `{path}/` | ✗ {count} files skipped |");
+                    }
+                }
             }
         }
         OutputFormat::Plain => {
-            for entry in &summary.files {
-                match &entry.status {
-                    FileStatus::Included => println!("  + {}", entry.path),
-                    FileStatus::Skipped(r) => println!("  - {} ({})", entry.path, r),
+            let tree = build_tree(&summary.files);
+            let display = collect_display_entries(&tree, "", compact);
+            for entry in &display {
+                match entry {
+                    DisplayEntry::File { path, status } => match status {
+                        FileStatus::Included => println!("  + {path}"),
+                        FileStatus::Skipped(r) => println!("  - {path} ({r})"),
+                    },
+                    DisplayEntry::CollapsedDir { path, count } => {
+                        println!("  - {path}/ ({count} files skipped)");
+                    }
                 }
             }
             println!(
@@ -205,7 +267,12 @@ fn print_list(summary: &FilesSummary, format: OutputFormat) {
     }
 }
 
-fn print_tree(summary: &FilesSummary, max_depth: Option<usize>, format: OutputFormat) {
+fn print_tree(
+    summary: &FilesSummary,
+    max_depth: Option<usize>,
+    compact: bool,
+    format: OutputFormat,
+) {
     if format == OutputFormat::Json {
         println!(
             "{}",
@@ -225,7 +292,7 @@ fn print_tree(summary: &FilesSummary, max_depth: Option<usize>, format: OutputFo
         println!("```");
     }
 
-    render_tree_node(&tree, "", true, 0, max_depth);
+    render_tree_node(&tree, "", true, 0, max_depth, compact);
 
     if is_md {
         println!("```");
@@ -241,6 +308,11 @@ fn print_tree(summary: &FilesSummary, max_depth: Option<usize>, format: OutputFo
 struct TreeNode {
     children_dirs: BTreeMap<String, TreeNode>,
     files: Vec<(String, FileStatus)>,
+}
+
+enum DisplayEntry {
+    File { path: String, status: FileStatus },
+    CollapsedDir { path: String, count: usize },
 }
 
 impl TreeNode {
@@ -259,6 +331,24 @@ impl TreeNode {
             skip += cs;
         }
         (inc, skip)
+    }
+
+    fn all_skipped(&self) -> bool {
+        (!self.files.is_empty() || !self.children_dirs.is_empty())
+            && self
+                .files
+                .iter()
+                .all(|(_, s)| matches!(s, FileStatus::Skipped(_)))
+            && self.children_dirs.values().all(|c| c.all_skipped())
+    }
+
+    fn total_files(&self) -> usize {
+        self.files.len()
+            + self
+                .children_dirs
+                .values()
+                .map(|c| c.total_files())
+                .sum::<usize>()
     }
 }
 
@@ -284,6 +374,7 @@ fn render_tree_node(
     is_root: bool,
     current_depth: usize,
     max_depth: Option<usize>,
+    compact: bool,
 ) {
     let total_children = node.children_dirs.len() + node.files.len();
     let mut idx = 0;
@@ -307,6 +398,12 @@ fn render_tree_node(
             format!("{prefix}│   ")
         };
 
+        if compact && child.all_skipped() {
+            let total = child.total_files();
+            println!("{prefix}{connector}{name}/ ({total} files skipped)");
+            continue;
+        }
+
         if let Some(max) = max_depth {
             if current_depth >= max {
                 let (inc, skip) = child.count();
@@ -316,7 +413,14 @@ fn render_tree_node(
         }
 
         println!("{prefix}{connector}{name}/");
-        render_tree_node(child, &child_prefix, false, current_depth + 1, max_depth);
+        render_tree_node(
+            child,
+            &child_prefix,
+            false,
+            current_depth + 1,
+            max_depth,
+            compact,
+        );
     }
 
     for (name, status) in &node.files {

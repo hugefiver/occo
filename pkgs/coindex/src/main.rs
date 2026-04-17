@@ -132,6 +132,10 @@ enum Commands {
         tree: bool,
         #[arg(long, help = "Max directory depth for tree display")]
         depth: Option<usize>,
+        #[arg(long, help = "Show .gitignore'd files in output")]
+        include_ignored: bool,
+        #[arg(long, help = "Disable collapsing fully-skipped directories")]
+        no_compact: bool,
     },
 }
 
@@ -235,9 +239,11 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             thorough,
             tree,
             depth,
+            include_ignored,
+            no_compact,
         } => {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-            files::run_files(paths, no_ignore, dirty, thorough, tree, depth, format)?;
+            files::run_files(paths, no_ignore, dirty, thorough, tree, depth, include_ignored, !no_compact, format)?;
         }
     }
     Ok(())
