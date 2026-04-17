@@ -2,6 +2,7 @@ mod auth;
 mod client;
 mod daemon;
 mod diff;
+mod files;
 mod filter;
 mod output;
 mod state;
@@ -111,6 +112,27 @@ enum Commands {
     Delete { fileset: String },
     #[command(about = "Show authentication status")]
     Auth,
+    #[command(about = "Show which files would be indexed and their filter status")]
+    Files {
+        #[arg(default_values_t = vec![String::from(".")])]
+        paths: Vec<String>,
+        #[arg(long, help = "Index files even if they match .gitignore rules")]
+        no_ignore: bool,
+        #[arg(
+            long,
+            help = "Include uncommitted working tree changes and untracked files"
+        )]
+        dirty: bool,
+        #[arg(
+            long,
+            help = "Use git-based binary detection (slower but more thorough)"
+        )]
+        thorough: bool,
+        #[arg(long, help = "Display as tree instead of flat list")]
+        tree: bool,
+        #[arg(long, help = "Max directory depth for tree display")]
+        depth: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -205,6 +227,17 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
         Commands::Auth => {
             let info = run_auth(interactive).await?;
             output::print_auth(&info, format);
+        }
+        Commands::Files {
+            paths,
+            no_ignore,
+            dirty,
+            thorough,
+            tree,
+            depth,
+        } => {
+            let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+            files::run_files(paths, no_ignore, dirty, thorough, tree, depth, format)?;
         }
     }
     Ok(())

@@ -1,7 +1,46 @@
+use std::fmt;
 use std::path::Path;
+
+use serde::Serialize;
 
 const MAX_FILE_SIZE: u64 = 1_048_576;
 const MAX_AVG_LINE_LENGTH: f64 = 500.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    EmptyFile,
+    TooLarge,
+    Lockfile,
+    Dotfile,
+    Minified,
+    SkipDir,
+    BinaryExt,
+    BinaryHeader,
+    HighNonAscii,
+    LongLines,
+    Gitignored,
+    GitBinary,
+}
+
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyFile => write!(f, "empty"),
+            Self::TooLarge => write!(f, "too_large"),
+            Self::Lockfile => write!(f, "lockfile"),
+            Self::Dotfile => write!(f, "dotfile"),
+            Self::Minified => write!(f, "minified"),
+            Self::SkipDir => write!(f, "skip_dir"),
+            Self::BinaryExt => write!(f, "binary_ext"),
+            Self::BinaryHeader => write!(f, "binary_header"),
+            Self::HighNonAscii => write!(f, "high_non_ascii"),
+            Self::LongLines => write!(f, "long_lines"),
+            Self::Gitignored => write!(f, "gitignored"),
+            Self::GitBinary => write!(f, "git_binary"),
+        }
+    }
+}
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -63,21 +102,25 @@ const LOCKFILES: &[&str] = &[
     "bun.lockb",
 ];
 
-pub fn can_ingest(path: &Path, size: u64) -> bool {
-    if size == 0 || size > MAX_FILE_SIZE {
-        return false;
+/// Returns `None` if the file passes path-based checks, or `Some(reason)` if it should be skipped.
+pub fn classify_path(path: &Path, size: u64) -> Option<SkipReason> {
+    if size == 0 {
+        return Some(SkipReason::EmptyFile);
+    }
+    if size > MAX_FILE_SIZE {
+        return Some(SkipReason::TooLarge);
     }
 
     let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
-        return false;
+        return Some(SkipReason::Dotfile);
     };
 
     if LOCKFILES.contains(&file_name) {
-        return false;
+        return Some(SkipReason::Lockfile);
     }
 
     if file_name.starts_with('.') {
-        return false;
+        return Some(SkipReason::Dotfile);
     }
 
     if file_name.ends_with(".min.js")
@@ -85,30 +128,38 @@ pub fn can_ingest(path: &Path, size: u64) -> bool {
         || file_name.ends_with(".map")
         || file_name.ends_with(".d.ts")
     {
-        return false;
+        return Some(SkipReason::Minified);
+    }
+
+    if path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .any(|segment| SKIP_DIRS.contains(&segment))
+    {
+        return Some(SkipReason::SkipDir);
     }
 
     if path
         .components()
         .filter_map(|c| c.as_os_str().to_str())
         .any(|segment| {
-            segment.starts_with('.')
-                || SKIP_DIRS.contains(&segment)
-                || segment.is_empty()
-                || segment == "."
-                || segment == ".."
+            segment.starts_with('.') || segment.is_empty() || segment == "." || segment == ".."
         })
     {
-        return false;
+        return Some(SkipReason::Dotfile);
     }
 
     if let Some(ext) = path.extension().and_then(|e| e.to_str())
         && BINARY_EXTS.contains(&ext.to_ascii_lowercase().as_str())
     {
-        return false;
+        return Some(SkipReason::BinaryExt);
     }
 
-    true
+    None
+}
+
+pub fn can_ingest(path: &Path, size: u64) -> bool {
+    classify_path(path, size).is_none()
 }
 
 const HEADER_CHECK_SIZE: usize = 8192;
@@ -118,27 +169,31 @@ pub fn has_binary_header(content: &[u8]) -> bool {
     content[..check_len].contains(&0)
 }
 
-pub fn can_ingest_content(content: &[u8]) -> bool {
+pub fn classify_content(content: &[u8]) -> Option<SkipReason> {
     if content.is_empty() {
-        return false;
+        return Some(SkipReason::EmptyFile);
     }
 
     if has_binary_header(content) {
-        return false;
+        return Some(SkipReason::BinaryHeader);
     }
 
     let non_ascii = content.iter().filter(|&&b| b > 0x7F).count();
     let non_ascii_ratio = non_ascii as f64 / content.len() as f64;
     if non_ascii_ratio > 0.5 {
-        return false;
+        return Some(SkipReason::HighNonAscii);
     }
 
     let line_count = content.iter().filter(|&&b| b == b'\n').count().max(1);
 
     let avg_line_len = content.len() as f64 / line_count as f64;
     if avg_line_len > MAX_AVG_LINE_LENGTH {
-        return false;
+        return Some(SkipReason::LongLines);
     }
 
-    true
+    None
+}
+
+pub fn can_ingest_content(content: &[u8]) -> bool {
+    classify_content(content).is_none()
 }
