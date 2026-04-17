@@ -17,6 +17,7 @@ use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use sha1::{Digest, Sha1};
+use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -75,6 +76,8 @@ enum Commands {
             help = "Use git-based binary detection (slower but more thorough)"
         )]
         thorough: bool,
+        #[arg(long, help = "Disable progress bar output")]
+        no_progress: bool,
     },
     #[command(about = "Watch for changes and auto-index")]
     Daemon {
@@ -94,6 +97,8 @@ enum Commands {
             help = "Use git-based binary detection (slower but more thorough)"
         )]
         thorough: bool,
+        #[arg(long, help = "Disable progress bar output")]
+        no_progress: bool,
     },
     #[command(about = "Search the semantic index")]
     Search {
@@ -164,9 +169,11 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             no_ignore,
             dirty,
             thorough,
+            no_progress,
         } => {
             let token = get_token(interactive).await?;
-            let result = run_index_core(token, path, since, no_ignore, dirty, thorough).await?;
+            let progress = interactive && !no_progress;
+            let result = run_index_core(token, path, since, no_ignore, dirty, thorough, progress).await?;
             output::print_index(&result, format);
         }
         Commands::Daemon {
@@ -175,8 +182,10 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             no_ignore,
             dirty,
             thorough,
+            no_progress,
         } => {
-            daemon::run_daemon(path, interval, no_ignore, dirty, thorough, interactive).await?;
+            let progress = interactive && !no_progress;
+            daemon::run_daemon(path, interval, no_ignore, dirty, thorough, progress, interactive).await?;
         }
         Commands::Search {
             query,
@@ -261,6 +270,30 @@ fn init_tracing() {
         .try_init();
 }
 
+fn make_progress_bar(len: u64, msg: &str) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("  {spinner:.green} {msg} [{bar:30.cyan/blue}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+    pb.set_message(msg.to_string());
+    pb
+}
+
+fn make_spinner(msg: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("  {spinner:.green} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    pb
+}
+
 struct FileData {
     relative_path: String,
     content: Vec<u8>,
@@ -272,6 +305,7 @@ fn collect_file_data(
     files: Vec<PathBuf>,
     ignored: &HashSet<String>,
     git_binaries: &HashSet<String>,
+    pb: Option<&ProgressBar>,
 ) -> Vec<FileData> {
     let mut result = Vec::new();
 
@@ -279,11 +313,13 @@ fn collect_file_data(
         let normalized = relative.to_string_lossy().replace('\\', "/");
         if ignored.contains(&normalized) {
             tracing::debug!(path = %normalized, "skipped (gitignored)");
+            if let Some(pb) = pb { pb.inc(1); }
             continue;
         }
 
         if git_binaries.contains(&normalized) {
             tracing::debug!(path = %normalized, "skipped (git binary)");
+            if let Some(pb) = pb { pb.inc(1); }
             continue;
         }
 
@@ -293,15 +329,18 @@ fn collect_file_data(
             Ok(meta) => meta,
             Err(error) => {
                 warn!(path = %absolute.display(), %error, "skipping file: metadata read failed");
+                if let Some(pb) = pb { pb.inc(1); }
                 continue;
             }
         };
 
         if !metadata.is_file() {
+            if let Some(pb) = pb { pb.inc(1); }
             continue;
         }
 
         if !filter::can_ingest(&relative, metadata.len()) {
+            if let Some(pb) = pb { pb.inc(1); }
             continue;
         }
 
@@ -309,11 +348,13 @@ fn collect_file_data(
             Ok(content) => content,
             Err(error) => {
                 warn!(path = %absolute.display(), %error, "skipping file: content read failed");
+                if let Some(pb) = pb { pb.inc(1); }
                 continue;
             }
         };
 
         if !filter::can_ingest_content(&bytes) {
+            if let Some(pb) = pb { pb.inc(1); }
             continue;
         }
 
@@ -325,6 +366,7 @@ fn collect_file_data(
             content: bytes,
             doc_sha,
         });
+        if let Some(pb) = pb { pb.inc(1); }
     }
 
     result
@@ -347,6 +389,7 @@ pub async fn run_index_core(
     no_ignore: bool,
     dirty: bool,
     thorough: bool,
+    progress: bool,
 ) -> Result<IndexResult> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let started = Instant::now();
@@ -423,7 +466,13 @@ pub async fn run_index_core(
         HashSet::new()
     };
 
-    let file_data = collect_file_data(&repo_root, candidates, &ignored, &git_binaries);
+    let pb_collect = if progress {
+        Some(make_progress_bar(candidates.len() as u64, "Collecting files"))
+    } else {
+        None
+    };
+    let file_data = collect_file_data(&repo_root, candidates, &ignored, &git_binaries, pb_collect.as_ref());
+    if let Some(pb) = pb_collect { pb.finish_and_clear(); }
     let files_indexed = file_data.len();
     info!(files = files_indexed, "collected files for indexing");
 
@@ -456,8 +505,10 @@ pub async fn run_index_core(
     }
     let new_checkpoint = b64.encode(checkpoint_hasher.finalize());
 
+    let sp_wasm = if progress { Some(make_spinner("Initializing WASM runtime")) } else { None };
     info!("initializing blackbird WASM runtime");
     let mut bb = BlackbirdWasm::new()?;
+    if let Some(sp) = sp_wasm { sp.finish_and_clear(); }
 
     for (i, sha) in doc_shas.iter().enumerate() {
         tracing::debug!(idx = i, sha = %hex::encode(sha), "doc_sha");
@@ -514,6 +565,7 @@ pub async fn run_index_core(
     let ingest_id = ingest.ingest_id;
     info!(ingest_id = %ingest_id, "ingest created");
 
+    let sp_symbols = if progress { Some(make_spinner("Uploading symbols")) } else { None };
     let mut next_range = Some(ingest.coded_symbol_range);
     while let Some(range) = next_range.take() {
         if range.start >= range.end {
@@ -521,48 +573,38 @@ pub async fn run_index_core(
         }
         let symbols = bb.create_coded_symbols(&doc_shas, range.start as u32, range.end as u32)?;
         let encoded: Vec<String> = symbols.iter().map(|s| b64.encode(s)).collect();
-        let total = encoded.len();
-
-        const CHUNK_SIZE: usize = 5000;
-        let chunks: Vec<&[String]> = encoded.chunks(CHUNK_SIZE).collect();
-        let num_chunks = chunks.len();
-
-        let mut last_resp = None;
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let chunk_start = range.start + (i * CHUNK_SIZE) as u64;
-            let chunk_end = chunk_start + chunk.len() as u64;
-            info!(
-                chunk = i + 1,
-                total_chunks = num_chunks,
-                start = chunk_start,
-                end = chunk_end,
-                count = chunk.len(),
-                total_symbols = total,
-                "uploading coded_symbols"
-            );
-
-            last_resp = Some(
-                client
-                    .upload_symbols(crate::types::UploadSymbolsRequest {
-                        ingest_id: ingest_id.clone(),
-                        coded_symbols: chunk.to_vec(),
-                        coded_symbol_range: crate::types::Range {
-                            start: chunk_start,
-                            end: chunk_end,
-                        },
-                    })
-                    .await?,
-            );
+        if let Some(sp) = &sp_symbols {
+            sp.set_message(format!("Uploading symbols ({}/{})", range.start, range.end));
         }
+        info!(
+            start = range.start,
+            end = range.end,
+            count = encoded.len(),
+            "uploading coded_symbols"
+        );
 
-        next_range = last_resp.and_then(|r| r.next_coded_symbol_range);
+        let resp = client
+            .upload_symbols(crate::types::UploadSymbolsRequest {
+                ingest_id: ingest_id.clone(),
+                coded_symbols: encoded,
+                coded_symbol_range: range,
+            })
+            .await?;
+
+        next_range = resp.next_coded_symbol_range;
     }
+    if let Some(sp) = sp_symbols { sp.finish_and_clear(); }
 
     let doc_map: std::collections::HashMap<String, &FileData> = file_data
         .iter()
         .map(|f| (b64.encode(f.doc_sha), f))
         .collect();
 
+    let pb_upload = if progress {
+        Some(make_progress_bar(files_indexed as u64, "Uploading documents"))
+    } else {
+        None
+    };
     let mut page_token = String::new();
     let mut uploaded = 0usize;
     loop {
@@ -593,16 +635,19 @@ pub async fn run_index_core(
         }
 
         uploaded += uploads.len();
-        client.upload_documents_concurrent(uploads).await?;
+        client.upload_documents_concurrent(uploads, pb_upload.as_ref()).await?;
 
         match batch.next_page_token {
             Some(token) if !token.is_empty() => page_token = token,
             _ => break,
         }
     }
+    if let Some(pb) = pb_upload { pb.finish_and_clear(); }
     info!(uploaded, "documents uploaded");
 
+    let sp_finalize = if progress { Some(make_spinner("Finalizing")) } else { None };
     client.finalize(FinalizeRequest { ingest_id }).await?;
+    if let Some(sp) = sp_finalize { sp.finish_and_clear(); }
 
     let elapsed = started.elapsed();
     info!(

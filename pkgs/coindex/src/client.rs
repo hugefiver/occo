@@ -232,6 +232,7 @@ impl IngestClient {
     pub async fn upload_documents_concurrent(
         &self,
         requests: Vec<UploadDocumentRequest>,
+        pb: Option<&indicatif::ProgressBar>,
     ) -> Result<()> {
         let mut iter = requests.into_iter();
         let mut in_flight = FuturesUnordered::new();
@@ -244,6 +245,7 @@ impl IngestClient {
 
         while let Some(result) = in_flight.next().await {
             result?;
+            if let Some(pb) = pb { pb.inc(1); }
             if let Some(req) = iter.next() {
                 in_flight.push(self.upload_document(req));
             }
