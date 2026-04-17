@@ -1,0 +1,108 @@
+diff --git a/packages/opencode/src/npm/index.ts b/packages/opencode/src/npm/index.ts
+index 174df1297..7362b9d47 100644
+--- a/packages/opencode/src/npm/index.ts
++++ b/packages/opencode/src/npm/index.ts
+@@ -3,6 +3,7 @@ import z from "zod"
+ import { NamedError } from "@opencode-ai/shared/util/error"
+ import { Global } from "../global"
+ import { Log } from "../util"
++import { which as whichCmd } from "../util/which"
+ import path from "path"
+ import { readdir, rm } from "fs/promises"
+ import { Filesystem } from "@/util"
+@@ -11,6 +12,18 @@ import { Flock } from "@opencode-ai/shared/util/flock"
+ const log = Log.create({ service: "npm" })
+ const illegal = process.platform === "win32" ? new Set(["<", ">", ":", '"', "|", "?", "*"]) : undefined
+ 
++// Windows + Bun: process.env.PATH may be undefined (case-sensitive key lookup)
++// while process.env.Path holds the actual value. Normalize so npm ecosystem tools
++// like @npmcli/arborist can find git via which.sync("git").
++if (process.platform === "win32") {
++  if (!process.env.PATH) process.env.PATH = process.env.Path ?? ""
++  const git = whichCmd("git")
++  if (git) {
++    const dir = path.dirname(git)
++    if (!process.env.PATH.split(path.delimiter).includes(dir)) process.env.PATH += path.delimiter + dir
++  }
++}
++
+ export const InstallFailedError = NamedError.create(
+   "NpmInstallFailedError",
+   z.object({
+diff --git a/packages/opencode/src/plugin/github-copilot/copilot.ts b/packages/opencode/src/plugin/github-copilot/copilot.ts
+index c9b7e3c1c..599c8ad84 100644
+--- a/packages/opencode/src/plugin/github-copilot/copilot.ts
++++ b/packages/opencode/src/plugin/github-copilot/copilot.ts
+@@ -98,6 +98,12 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+             const { isVision, isAgent } = iife(() => {
+               try {
+                 const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body
++                const userMsgsCount = Math.max(1, (body?.messages ?? body?.input ?? [])
++                  .map((x: { role?: string, content?: string | any[] }) => ((x?.role === "user" &&
++                    (Array.isArray(x?.content) ? x.content.some((part: any) => part?.type !== "tool_result") : !/^[/@]/.test(x?.content as string))) ? 1 : 0))
++                  .reduce((acc: number, x: number) => acc + x, 0))
++                const notUser = userMsgsCount > 1
++                // const notUser = userMsgsCount % 10 !== 1
+ 
+                 // Completions API
+                 if (body?.messages && url.includes("completions")) {
+@@ -107,7 +113,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                       (msg: any) =>
+                         Array.isArray(msg.content) && msg.content.some((part: any) => part.type === "image_url"),
+                     ),
+-                    isAgent: last?.role !== "user" || imgMsg(last),
++                    isAgent: last?.role !== "user" || imgMsg(last) || notUser,
+                   }
+                 }
+ 
+@@ -119,7 +125,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                       (item: any) =>
+                         Array.isArray(item?.content) && item.content.some((part: any) => part.type === "input_image"),
+                     ),
+-                    isAgent: last?.role !== "user" || imgMsg(last),
++                    isAgent: last?.role !== "user" || imgMsg(last) || notUser,
+                   }
+                 }
+ 
+@@ -141,10 +147,10 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+                               part.content.some((nested: any) => nested?.type === "image")),
+                         ),
+                     ),
+-                    isAgent: !(last?.role === "user" && hasNonToolCalls) || imgMsg(last),
++                    isAgent: !(last?.role === "user" && hasNonToolCalls) || imgMsg(last) || notUser,
+                   }
+                 }
+-              } catch {}
++              } catch { }
+               return { isVision: false, isAgent: false }
+             })
+ 
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 43ae9a5e9..19581b98a 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -187,6 +187,15 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
+         },
+         options: {},
+       }),
++    occo: () =>
++      Effect.succeed({
++        autoload: true,
++        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
++          if (useLanguageModel(sdk)) return sdk.languageModel(modelID)
++          return shouldUseCopilotResponsesApi(modelID) ? sdk.responses(modelID) : sdk.chat(modelID)
++        },
++        options: {},
++      }),
+     "github-copilot": () =>
+       Effect.succeed({
+         autoload: false,
+@@ -1563,7 +1572,7 @@ const layer: Layer.Layer<
+       if (providerID.startsWith("opencode")) {
+         priority = ["gpt-5-nano"]
+       }
+-      if (providerID.startsWith("github-copilot")) {
++      if (providerID.startsWith("github-copilot") || providerID.startsWith("occo")) {
+         priority = ["gpt-5-mini", "claude-haiku-4.5", ...priority]
+       }
+       for (const item of priority) {
