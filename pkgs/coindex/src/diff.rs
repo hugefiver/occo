@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 pub fn get_current_head(repo_path: &Path) -> Result<String> {
     let output = run_git(repo_path, &["rev-parse", "HEAD"])?;
@@ -93,6 +93,33 @@ pub fn get_dirty_files(repo_path: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(result)
+}
+
+pub fn get_git_binary_files(repo_path: &Path) -> Result<HashSet<String>> {
+    let all_output = run_git(repo_path, &["ls-files"])?;
+    let all_files: HashSet<String> = all_output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| l.replace('\\', "/"))
+        .collect();
+
+    // `git grep -Il ''` lists files that contain at least one line (text files).
+    // Binary files are excluded from this output.
+    let text_output = Command::new("git")
+        .args(["grep", "-Il", ""])
+        .current_dir(repo_path)
+        .output()
+        .context("failed to run git grep")?;
+
+    let text_files: HashSet<String> = String::from_utf8_lossy(&text_output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| l.replace('\\', "/"))
+        .collect();
+
+    Ok(all_files.difference(&text_files).cloned().collect())
 }
 
 /// Check which paths are ignored by .gitignore rules.

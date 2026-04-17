@@ -21,9 +21,34 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 const BINARY_EXTS: &[&str] = &[
-    "exe", "dll", "so", "dylib", "o", "a", "lib", "obj", "bin", "dat", "db", "sqlite", "png",
-    "jpg", "jpeg", "gif", "bmp", "ico", "svg", "woff", "woff2", "ttf", "eot", "mp3", "mp4", "avi",
-    "mov", "zip", "tar", "gz", "bz2", "7z", "rar", "jar", "war", "class", "pyc", "pyo", "wasm",
+    // Executables & shared libraries
+    "exe", "dll", "so", "dylib", "o", "a", "lib", "obj", "bin", "com", "msi", "apk", "deb", "rpm",
+    // Data & databases
+    "dat", "db", "sqlite", "sqlite3", "mdb", "accdb", "ldb", "parquet", "arrow", "avro",
+    // Images
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "tiff", "tif", "psd", "ai", "eps",
+    "heic", "heif", "raw", "cr2", "nef", "dng", "icns",
+    // Fonts
+    "woff", "woff2", "ttf", "eot", "otf",
+    // Audio
+    "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus",
+    // Video
+    "mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "mpg", "mpeg",
+    // Archives & compressed
+    "zip", "tar", "gz", "bz2", "7z", "rar", "xz", "zst", "lz4", "lzma", "cab", "dmg", "iso",
+    // Java / JVM
+    "jar", "war", "ear", "class",
+    // Python bytecode
+    "pyc", "pyo", "pyd",
+    // .NET
+    "nupkg",
+    // WebAssembly
+    "wasm",
+    // Documents (binary formats)
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
+    // Misc binary
+    "swf", "fla", "blend", "fbx", "glb", "gltf", "3ds", "dwg", "dxf",
+    "DS_Store", "thumbs.db",
 ];
 
 const LOCKFILES: &[&str] = &[
@@ -86,8 +111,19 @@ pub fn can_ingest(path: &Path, size: u64) -> bool {
     true
 }
 
+const HEADER_CHECK_SIZE: usize = 8192;
+
+pub fn has_binary_header(content: &[u8]) -> bool {
+    let check_len = content.len().min(HEADER_CHECK_SIZE);
+    content[..check_len].contains(&0)
+}
+
 pub fn can_ingest_content(content: &[u8]) -> bool {
     if content.is_empty() {
+        return false;
+    }
+
+    if has_binary_header(content) {
         return false;
     }
 

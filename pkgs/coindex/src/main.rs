@@ -69,6 +69,11 @@ enum Commands {
             help = "Include uncommitted working tree changes and untracked files"
         )]
         dirty: bool,
+        #[arg(
+            long,
+            help = "Use git-based binary detection (slower but more thorough)"
+        )]
+        thorough: bool,
     },
     #[command(about = "Watch for changes and auto-index")]
     Daemon {
@@ -83,6 +88,11 @@ enum Commands {
             help = "Include uncommitted working tree changes and untracked files"
         )]
         dirty: bool,
+        #[arg(
+            long,
+            help = "Use git-based binary detection (slower but more thorough)"
+        )]
+        thorough: bool,
     },
     #[command(about = "Search the semantic index")]
     Search {
@@ -127,9 +137,10 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             since,
             no_ignore,
             dirty,
+            thorough,
         } => {
             let token = get_token(interactive).await?;
-            let result = run_index_core(token, path, since, no_ignore, dirty).await?;
+            let result = run_index_core(token, path, since, no_ignore, dirty, thorough).await?;
             output::print_index(&result, format);
         }
         Commands::Daemon {
@@ -137,8 +148,9 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             interval,
             no_ignore,
             dirty,
+            thorough,
         } => {
-            daemon::run_daemon(path, interval, no_ignore, dirty, interactive).await?;
+            daemon::run_daemon(path, interval, no_ignore, dirty, thorough, interactive).await?;
         }
         Commands::Search {
             query,
@@ -220,6 +232,7 @@ fn collect_file_data(
     repo_root: &Path,
     files: Vec<PathBuf>,
     ignored: &HashSet<String>,
+    git_binaries: &HashSet<String>,
 ) -> Vec<FileData> {
     let mut result = Vec::new();
 
@@ -227,6 +240,11 @@ fn collect_file_data(
         let normalized = relative.to_string_lossy().replace('\\', "/");
         if ignored.contains(&normalized) {
             tracing::debug!(path = %normalized, "skipped (gitignored)");
+            continue;
+        }
+
+        if git_binaries.contains(&normalized) {
+            tracing::debug!(path = %normalized, "skipped (git binary)");
             continue;
         }
 
@@ -289,6 +307,7 @@ pub async fn run_index_core(
     since: Option<String>,
     no_ignore: bool,
     dirty: bool,
+    thorough: bool,
 ) -> Result<IndexResult> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let started = Instant::now();
@@ -358,7 +377,14 @@ pub async fn run_index_core(
         diff::check_ignored(&repo_root, &candidates)?
     };
 
-    let file_data = collect_file_data(&repo_root, candidates, &ignored);
+    let git_binaries = if thorough {
+        info!("running git-based binary detection");
+        diff::get_git_binary_files(&repo_root)?
+    } else {
+        HashSet::new()
+    };
+
+    let file_data = collect_file_data(&repo_root, candidates, &ignored, &git_binaries);
     let files_indexed = file_data.len();
     info!(files = files_indexed, "collected files for indexing");
 
