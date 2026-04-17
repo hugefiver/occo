@@ -46,6 +46,7 @@ impl IngestClient {
         let http = reqwest::Client::builder()
             .user_agent("vscode/1.115.0")
             .default_headers(headers)
+            .timeout(Duration::from_secs(300))
             .build()
             .context("failed to build HTTP client")?;
 
@@ -68,19 +69,30 @@ impl IngestClient {
             debug!(body = %body, "create_ingest body");
         }
 
+        let mut network_retries = 0u32;
+
         loop {
             attempts += 1;
             if attempts > 20 {
                 bail!("create_ingest exceeded retry attempts");
             }
 
-            let response = self
-                .http
-                .post(&url)
-                .json(&req)
-                .send()
-                .await
-                .context("create_ingest request failed")?;
+            let response = match self.http.post(&url).json(&req).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if network_retries >= 3 {
+                        return Err(anyhow!(
+                            "create_ingest network error after {} retries: {err}",
+                            network_retries
+                        ));
+                    }
+                    network_retries += 1;
+                    let backoff = 1u64 << network_retries;
+                    debug!("create_ingest network error (retry {network_retries}/3, backoff {backoff}s): {err}");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    continue;
+                }
+            };
             let status = response.status();
 
             if status.is_success() {
@@ -248,19 +260,29 @@ impl IngestClient {
 
     pub async fn list_filesets(&self) -> Result<ListFilesetsResponse> {
         let url = self.url("/external/code/ingest");
-        let mut attempts = 0u32;
+        let mut throttle_retries = 0u32;
+        let mut network_retries = 0u32;
         loop {
-            attempts += 1;
-            if attempts > 10 {
-                bail!("list_filesets exceeded retry attempts");
+            if throttle_retries > 10 {
+                bail!("list_filesets exceeded 429 retry attempts");
             }
 
-            let response = self
-                .http
-                .get(&url)
-                .send()
-                .await
-                .context("list_filesets request failed")?;
+            let response = match self.http.get(&url).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if network_retries >= 3 {
+                        return Err(anyhow!(
+                            "list_filesets network error after {} retries: {err}",
+                            network_retries
+                        ));
+                    }
+                    network_retries += 1;
+                    let backoff = 1u64 << network_retries;
+                    debug!("list_filesets network error (retry {network_retries}/3, backoff {backoff}s): {err}");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    continue;
+                }
+            };
 
             let status = response.status();
             if status.is_success() {
@@ -271,9 +293,9 @@ impl IngestClient {
                 return Ok(payload);
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS
-                && let Some(wait) = retry_after_secs(response.headers())
-            {
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                throttle_retries += 1;
+                let wait = retry_after_secs(response.headers()).unwrap_or(1);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 continue;
             }
@@ -285,29 +307,38 @@ impl IngestClient {
 
     pub async fn delete_fileset(&self, req: DeleteFilesetRequest) -> Result<()> {
         let url = self.url("/external/code/ingest");
-        let mut attempts = 0u32;
+        let mut throttle_retries = 0u32;
+        let mut network_retries = 0u32;
         loop {
-            attempts += 1;
-            if attempts > 10 {
-                bail!("delete_fileset exceeded retry attempts");
+            if throttle_retries > 10 {
+                bail!("delete_fileset exceeded 429 retry attempts");
             }
 
-            let response = self
-                .http
-                .delete(&url)
-                .json(&req)
-                .send()
-                .await
-                .context("delete_fileset request failed")?;
+            let response = match self.http.delete(&url).json(&req).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if network_retries >= 3 {
+                        return Err(anyhow!(
+                            "delete_fileset network error after {} retries: {err}",
+                            network_retries
+                        ));
+                    }
+                    network_retries += 1;
+                    let backoff = 1u64 << network_retries;
+                    debug!("delete_fileset network error (retry {network_retries}/3, backoff {backoff}s): {err}");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    continue;
+                }
+            };
 
             let status = response.status();
             if status.is_success() {
                 return Ok(());
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS
-                && let Some(wait) = retry_after_secs(response.headers())
-            {
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                throttle_retries += 1;
+                let wait = retry_after_secs(response.headers()).unwrap_or(1);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 continue;
             }
@@ -337,21 +368,30 @@ impl IngestClient {
         TRes: DeserializeOwned,
     {
         let url = self.url(path);
-        let mut attempts = 0u32;
+        let mut throttle_retries = 0u32;
+        let mut network_retries = 0u32;
 
         loop {
-            attempts += 1;
-            if attempts > 10 {
-                bail!("{op_name} exceeded retry attempts");
+            if throttle_retries > 10 {
+                bail!("{op_name} exceeded 429 retry attempts");
             }
 
-            let response = self
-                .http
-                .post(&url)
-                .json(payload)
-                .send()
-                .await
-                .with_context(|| format!("{op_name} request failed"))?;
+            let response = match self.http.post(&url).json(payload).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if network_retries >= 3 {
+                        return Err(anyhow!(
+                            "{op_name} network error after {} retries: {err}",
+                            network_retries
+                        ));
+                    }
+                    network_retries += 1;
+                    let backoff = 1u64 << network_retries;
+                    debug!("{op_name} network error (retry {network_retries}/3, backoff {backoff}s): {err}");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    continue;
+                }
+            };
 
             let status = response.status();
             if status.is_success() {
@@ -362,9 +402,9 @@ impl IngestClient {
                 return Ok(value);
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS
-                && let Some(wait) = retry_after_secs(response.headers())
-            {
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                throttle_retries += 1;
+                let wait = retry_after_secs(response.headers()).unwrap_or(1);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 continue;
             }
@@ -383,29 +423,39 @@ impl IngestClient {
     where
         TReq: Serialize + ?Sized,
     {
-        let mut attempts = 0u32;
+        let mut throttle_retries = 0u32;
+        let mut network_retries = 0u32;
+
         loop {
-            attempts += 1;
-            if attempts > 10 {
-                bail!("{op_name} exceeded retry attempts");
+            if throttle_retries > 10 {
+                bail!("{op_name} exceeded 429 retry attempts");
             }
 
-            let response = self
-                .http
-                .post(url)
-                .json(payload)
-                .send()
-                .await
-                .with_context(|| format!("{op_name} request failed"))?;
+            let response = match self.http.post(url).json(payload).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if network_retries >= 3 {
+                        return Err(anyhow!(
+                            "{op_name} network error after {} retries: {err}",
+                            network_retries
+                        ));
+                    }
+                    network_retries += 1;
+                    let backoff = 1u64 << network_retries;
+                    debug!("{op_name} network error (retry {network_retries}/3, backoff {backoff}s): {err}");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    continue;
+                }
+            };
 
             let status = response.status();
             if status.is_success() {
                 return Ok(());
             }
 
-            if status == StatusCode::TOO_MANY_REQUESTS
-                && let Some(wait) = retry_after_secs(response.headers())
-            {
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                throttle_retries += 1;
+                let wait = retry_after_secs(response.headers()).unwrap_or(1);
                 tokio::time::sleep(Duration::from_secs(wait)).await;
                 continue;
             }

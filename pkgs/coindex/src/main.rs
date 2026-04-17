@@ -521,22 +521,41 @@ pub async fn run_index_core(
         }
         let symbols = bb.create_coded_symbols(&doc_shas, range.start as u32, range.end as u32)?;
         let encoded: Vec<String> = symbols.iter().map(|s| b64.encode(s)).collect();
-        info!(
-            start = range.start,
-            end = range.end,
-            count = encoded.len(),
-            "uploading coded_symbols"
-        );
+        let total = encoded.len();
 
-        let resp = client
-            .upload_symbols(crate::types::UploadSymbolsRequest {
-                ingest_id: ingest_id.clone(),
-                coded_symbols: encoded,
-                coded_symbol_range: range,
-            })
-            .await?;
+        const CHUNK_SIZE: usize = 5000;
+        let chunks: Vec<&[String]> = encoded.chunks(CHUNK_SIZE).collect();
+        let num_chunks = chunks.len();
 
-        next_range = resp.next_coded_symbol_range;
+        let mut last_resp = None;
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let chunk_start = range.start + (i * CHUNK_SIZE) as u64;
+            let chunk_end = chunk_start + chunk.len() as u64;
+            info!(
+                chunk = i + 1,
+                total_chunks = num_chunks,
+                start = chunk_start,
+                end = chunk_end,
+                count = chunk.len(),
+                total_symbols = total,
+                "uploading coded_symbols"
+            );
+
+            last_resp = Some(
+                client
+                    .upload_symbols(crate::types::UploadSymbolsRequest {
+                        ingest_id: ingest_id.clone(),
+                        coded_symbols: chunk.to_vec(),
+                        coded_symbol_range: crate::types::Range {
+                            start: chunk_start,
+                            end: chunk_end,
+                        },
+                    })
+                    .await?,
+            );
+        }
+
+        next_range = last_resp.and_then(|r| r.next_coded_symbol_range);
     }
 
     let doc_map: std::collections::HashMap<String, &FileData> = file_data
