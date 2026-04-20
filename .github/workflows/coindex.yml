@@ -1,0 +1,32 @@
+name: coindex CI
+
+on:
+  push:
+    paths:
+      - "pkgs/coindex/**"
+  pull_request:
+    paths:
+      - "pkgs/coindex/**"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pkgs/coindex
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pkgs/coindex
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Test
+        run: cargo test
