@@ -58,14 +58,14 @@ export async function OccoAuthPlugin({ client }) {
   // ---------------------------------------------------------------------------
   // Token refresh helper — reused at loader init and per-request
   // ---------------------------------------------------------------------------
-  async function refreshTokenIfNeeded(getAuth, force = false) {
+  async function refreshTokenIfNeeded(getAuth) {
     const info = await getAuth();
     if (!info || info.type !== "oauth") return info;
     if (!info.refresh) return info;
 
-    // Refresh if: forced, no access token, or expired/about-to-expire
+    // Refresh if: no access token, or expired/about-to-expire
     // (stored expires already has a 5-minute buffer baked in)
-    const needsRefresh = force || !info.access || info.expires < Date.now();
+    const needsRefresh = !info.access || info.expires < Date.now();
     if (!needsRefresh) return info;
 
     const response = await fetch(TOKEN_URL, {
@@ -188,7 +188,7 @@ export async function OccoAuthPlugin({ client }) {
   // Context = min(max_context_window_tokens, max_output_tokens + max_prompt_tokens).
   //
   // Variant assignment:
-  //   claude-opus-4.7 → adaptive thinking + effort variants (high/xhigh/max), default=high
+  //   claude-opus-4.7 → adaptive thinking + effort variants (high/xhigh/max), default=medium
   //   claude-opus-4.5/4.6 → thinking(16000) / max(32000)
   //   claude-sonnet/haiku → thinking only (no max)
   //   gemini         → no variants
@@ -220,7 +220,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 192000, output: 64000 },
-      options: { effort: "high" },
+      options: { effort: "medium" },
       variants: CLAUDE_OPUS_47_VARIANTS,
     },
     "claude-opus-4.6": {
