@@ -7,13 +7,14 @@ mod filter;
 mod output;
 mod state;
 mod types;
+mod vscode_local;
 mod wasm;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use sha1::{Digest, Sha1};
@@ -25,8 +26,8 @@ use crate::auth::{get_token, run_auth};
 use crate::client::IngestClient;
 use crate::output::OutputFormat;
 use crate::types::{
-    CreateIngestRequest, DeleteFilesetRequest, FinalizeRequest, SearchRequest,
-    UploadDocumentRequest,
+    CreateIngestRequest, DeleteFilesetRequest, FinalizeRequest, SearchRequest, SearchSource,
+    TaggedSearchResult, UploadDocumentRequest,
 };
 use crate::wasm::BlackbirdWasm;
 
@@ -78,6 +79,8 @@ enum Commands {
         thorough: bool,
         #[arg(long, help = "Disable progress bar output")]
         no_progress: bool,
+        #[arg(long, help = "Trigger GitHub remote semantic indexing after local index")]
+        auto_github_index: bool,
     },
     #[command(about = "Watch for changes and auto-index")]
     Daemon {
@@ -104,9 +107,23 @@ enum Commands {
     Search {
         query: String,
         #[arg(long)]
-        fileset: String,
+        fileset: Option<String>,
+        #[arg(long)]
+        repo: Option<String>,
         #[arg(long, default_value = "10")]
         limit: u32,
+        #[arg(long)]
+        no_github: bool,
+        #[arg(long)]
+        no_external_ingest: bool,
+        #[arg(long, conflicts_with = "external_ingest_only")]
+        github_only: bool,
+        #[arg(long, conflicts_with = "github_only")]
+        external_ingest_only: bool,
+        #[arg(long)]
+        auto_github_index: bool,
+        #[arg(long)]
+        vscode_local: bool,
     },
     #[command(about = "List indexed filesets and their status")]
     Status {
@@ -116,7 +133,10 @@ enum Commands {
     #[command(about = "Delete a fileset")]
     Delete { fileset: String },
     #[command(about = "Show authentication status")]
-    Auth,
+    Auth {
+        #[arg(long, help = "Force re-authentication even if a token already exists")]
+        force: bool,
+    },
     #[command(about = "Show which files would be indexed and their filter status")]
     Files {
         #[arg(default_values_t = vec![String::from(".")])]
@@ -170,11 +190,62 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             dirty,
             thorough,
             no_progress,
+            auto_github_index,
         } => {
             let token = get_token(interactive).await?;
             let progress = interactive && !no_progress;
-            let result = run_index_core(token, path, since, no_ignore, dirty, thorough, progress).await?;
+            let result = run_index_core(token.clone(), path.clone(), since, no_ignore, dirty, thorough, progress).await?;
             output::print_index(&result, format);
+
+            if auto_github_index {
+                let repo_root = diff::get_repo_root(&path).ok();
+                let nwo = repo_root.as_ref().and_then(|root| {
+                    diff::get_github_remote(root).ok().flatten()
+                });
+                if let Some((owner, name)) = nwo {
+                    let repo = format!("{owner}/{name}");
+                    let client = IngestClient::new(token)?;
+                    match client.check_github_index(&repo).await {
+                        Ok(status) if status.semantic_indexing_enabled && status.semantic_code_search_ok => {
+                            info!(repo = %repo, "GitHub remote index already active");
+                        }
+                        _ => {
+                            info!(repo = %repo, "triggering GitHub remote indexing");
+                            match client.trigger_github_indexing(&repo).await {
+                                Ok(()) => info!(repo = %repo, "GitHub remote indexing triggered"),
+                                Err(e) => {
+                                    warn!(repo = %repo, error = %e, "trigger failed with Copilot token, trying VS Code auth");
+                                    let vscode_token = match auth::read_vscode_token() {
+                                        Ok(Some(t)) => Some(t),
+                                        _ => {
+                                            match auth::vscode_device_flow_token("repo").await {
+                                                Ok(t) => {
+                                                    if let Err(save_err) = auth::save_vscode_token(&t) {
+                                                        warn!(error = %save_err, "failed to save VS Code token");
+                                                    }
+                                                    Some(t)
+                                                }
+                                                Err(auth_err) => {
+                                                    warn!(error = %auth_err, "VS Code authentication failed");
+                                                    None
+                                                }
+                                            }
+                                        }
+                                    };
+                                    if let Some(token) = vscode_token {
+                                        match IngestClient::new(token)?.trigger_github_indexing(&repo).await {
+                                            Ok(()) => info!(repo = %repo, "GitHub remote indexing triggered with VS Code token"),
+                                            Err(e2) => warn!(repo = %repo, error = %e2, "still could not trigger remote indexing"),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    warn!("no GitHub remote detected, skipping remote index trigger");
+                }
+            }
         }
         Commands::Daemon {
             path,
@@ -190,10 +261,31 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
         Commands::Search {
             query,
             fileset,
+            repo,
             limit,
+            no_github,
+            no_external_ingest,
+            github_only,
+            external_ingest_only,
+            auto_github_index,
+            vscode_local,
         } => {
             let token = get_token(interactive).await?;
-            let response = run_search(token, query, fileset, limit).await?;
+            let use_github = !no_github && !external_ingest_only;
+            let use_external_ingest = !no_external_ingest && !github_only;
+            let use_vscode_local = vscode_local;
+            let response = run_search(
+                token,
+                query,
+                fileset,
+                repo,
+                limit,
+                use_github,
+                use_external_ingest,
+                use_vscode_local,
+                auto_github_index,
+            )
+            .await?;
             output::print_search(&response, format);
         }
         Commands::Status { path } => {
@@ -216,11 +308,21 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
                         .cloned();
                     let local_state = state::StateFile::load();
                     let local = local_state.get(&fileset_name);
+                    let github_info = match diff::get_github_remote(&repo_root) {
+                        Ok(Some((owner, name))) => {
+                            let nwo = format!("{owner}/{name}");
+                            let client = IngestClient::new(token)?;
+                            let indexed = client.check_github_index(&nwo).await.ok();
+                            Some((nwo, indexed))
+                        }
+                        _ => None,
+                    };
                     output::print_project_status(
                         &repo_root,
                         &fileset_name,
                         fileset.as_ref(),
                         local,
+                        github_info.as_ref(),
                         format,
                     );
                 }
@@ -237,8 +339,8 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
             let _ = local_state.save();
             output::print_delete(&fileset, format);
         }
-        Commands::Auth => {
-            let info = run_auth(interactive).await?;
+        Commands::Auth { force } => {
+            let info = run_auth(interactive, force).await?;
             output::print_auth(&info, format);
         }
         Commands::Files {
@@ -683,22 +785,192 @@ fn relative_to_api_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+const EMBEDDING_MODEL: &str = "metis-1024-I16-Binary";
+
 async fn run_search(
     token: String,
     query: String,
-    fileset: String,
+    fileset: Option<String>,
+    repo: Option<String>,
     limit: u32,
-) -> Result<types::SearchResponse> {
+    use_github: bool,
+    use_external_ingest: bool,
+    use_vscode_local: bool,
+    auto_github_index: bool,
+) -> Result<types::HybridSearchResponse> {
     let client = IngestClient::new(token)?;
 
-    client
-        .search(SearchRequest {
-            prompt: query,
-            scoping_query: format!("fileset:{fileset}"),
-            embedding_model: "metis-1024-I16-Binary".to_string(),
-            limit,
-        })
-        .await
+    let repo_nwo = if use_github {
+        match repo {
+            Some(r) => Some(r),
+            None => {
+                let cwd = std::env::current_dir()?;
+                diff::get_repo_root(&cwd).ok().and_then(|root| {
+                    diff::get_github_remote(&root)
+                        .ok()
+                        .flatten()
+                        .map(|(o, n)| format!("{o}/{n}"))
+                })
+            }
+        }
+    } else {
+        None
+    };
+
+    let fileset_name = if use_external_ingest {
+        match fileset {
+            Some(f) => Some(f),
+            None => {
+                let cwd = std::env::current_dir()?;
+                diff::get_repo_root(&cwd).ok().and_then(|root| {
+                    root.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                })
+            }
+        }
+    } else {
+        None
+    };
+
+    if repo_nwo.is_none() && fileset_name.is_none() && !use_vscode_local {
+        bail!("no search sources available: could not detect GitHub remote or fileset name");
+    }
+
+    if auto_github_index {
+        if let Some(nwo) = &repo_nwo {
+            match client.check_github_index(nwo).await {
+                Ok(status) if !status.semantic_indexing_enabled => {
+                    info!(repo = %nwo, "triggering GitHub semantic indexing");
+                    if let Err(e) = client.trigger_github_indexing(nwo).await {
+                        warn!(repo = %nwo, error = %e, "failed to trigger indexing");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Parallel search
+    let github_fut = async {
+        match &repo_nwo {
+            Some(nwo) => {
+                let resp = client
+                    .search_github(SearchRequest {
+                        prompt: query.clone(),
+                        scoping_query: format!("repo:{nwo}"),
+                        embedding_model: EMBEDDING_MODEL.to_string(),
+                        limit,
+                        include_embeddings: Some(false),
+                    })
+                    .await;
+                Some((nwo.clone(), resp))
+            }
+            None => None,
+        }
+    };
+
+    let ingest_fut = async {
+        match &fileset_name {
+            Some(fs) => {
+                let resp = client
+                    .search(SearchRequest {
+                        prompt: query.clone(),
+                        scoping_query: format!("fileset:{fs}"),
+                        embedding_model: EMBEDDING_MODEL.to_string(),
+                        limit,
+                        include_embeddings: Some(false),
+                    })
+                    .await;
+                Some((fs.clone(), resp))
+            }
+            None => None,
+        }
+    };
+
+    let (github_result, ingest_result) = tokio::join!(github_fut, ingest_fut);
+
+    let mut all_results: Vec<TaggedSearchResult> = Vec::new();
+    let mut embedding_model = EMBEDDING_MODEL.to_string();
+
+    if let Some((nwo, result)) = github_result {
+        match result {
+            Ok(resp) => {
+                embedding_model.clone_from(&resp.embedding_model);
+                for r in resp.results {
+                    all_results.push(TaggedSearchResult {
+                        source: SearchSource::GitHub(nwo.clone()),
+                        result: r,
+                    });
+                }
+            }
+            Err(e) => warn!(source = "github", error = %e, "search failed"),
+        }
+    }
+
+    if let Some((fs, result)) = ingest_result {
+        match result {
+            Ok(resp) => {
+                embedding_model.clone_from(&resp.embedding_model);
+                for r in resp.results {
+                    all_results.push(TaggedSearchResult {
+                        source: SearchSource::ExternalIngest(fs.clone()),
+                        result: r,
+                    });
+                }
+            }
+            Err(e) => warn!(source = "external_ingest", error = %e, "search failed"),
+        }
+    }
+
+    if use_vscode_local {
+        let cwd = std::env::current_dir()?;
+        if let Ok(root) = diff::get_repo_root(&cwd) {
+            match vscode_local::search_vscode_local(&root, &query, limit) {
+                Ok(results) => {
+                    for r in results {
+                        all_results.push(TaggedSearchResult {
+                            source: SearchSource::VscodeLocal,
+                            result: r,
+                        });
+                    }
+                }
+                Err(e) => warn!(source = "vscode_local", error = %e, "search failed"),
+            }
+        }
+    }
+
+    all_results = deduplicate_results(all_results);
+    all_results.sort_by(|a, b| {
+        a.result
+            .distance
+            .partial_cmp(&b.result.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    all_results.truncate(limit as usize);
+
+    Ok(types::HybridSearchResponse {
+        results: all_results,
+        embedding_model,
+    })
+}
+
+fn deduplicate_results(results: Vec<TaggedSearchResult>) -> Vec<TaggedSearchResult> {
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    let mut deduped: Vec<TaggedSearchResult> = Vec::new();
+
+    for r in results {
+        let key = (r.result.location.path.clone(), r.result.chunk.hash.clone());
+        if let Some(&idx) = seen.get(&key) {
+            if r.result.distance < deduped[idx].result.distance {
+                deduped[idx] = r;
+            }
+        } else {
+            seen.insert(key, deduped.len());
+            deduped.push(r);
+        }
+    }
+    deduped
 }
 
 async fn run_status(token: String) -> Result<types::ListFilesetsResponse> {

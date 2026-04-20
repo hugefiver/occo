@@ -22,3 +22,8 @@ hex = "0.4"
 futures = "0.3"
 wasmtime = { version = "43", default-features = false, features = ["cranelift", "gc", "gc-drc", "runtime", "std"] }
 indicatif = "0.18"
+rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
+
+[features]
+default = []
+vscode-local = ["dep:rusqlite"]

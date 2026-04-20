@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+const VSCODE_CLIENT_ID: &str = "01ab8ac9400c4e429b23";
 
 #[derive(Debug, Deserialize)]
 struct AuthFile {
@@ -44,6 +45,8 @@ pub struct AuthInfo {
 #[derive(Debug, Serialize, Deserialize)]
 struct CoindexAuthFile {
     refresh: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    vscode_refresh: Option<String>,
 }
 
 pub async fn get_token(interactive: bool) -> Result<String> {
@@ -64,22 +67,27 @@ pub async fn get_token(interactive: bool) -> Result<String> {
     Ok(token)
 }
 
-pub async fn run_auth(interactive: bool) -> Result<AuthInfo> {
-    if read_coindex_token()?.is_some() {
-        return Ok(AuthInfo {
-            authenticated: true,
-            source: Some("coindex".to_string()),
-        });
-    }
+pub async fn run_auth(interactive: bool, force: bool) -> Result<AuthInfo> {
+    if !force {
+        if read_coindex_token()?.is_some() {
+            return Ok(AuthInfo {
+                authenticated: true,
+                source: Some("coindex".to_string()),
+            });
+        }
 
-    if read_opencode_token()?.is_some() {
-        return Ok(AuthInfo {
-            authenticated: true,
-            source: Some("opencode".to_string()),
-        });
+        if read_opencode_token()?.is_some() {
+            return Ok(AuthInfo {
+                authenticated: true,
+                source: Some("opencode".to_string()),
+            });
+        }
     }
 
     if !interactive {
+        if force {
+            bail!("--force requires interactive mode (cannot run in JSON/Markdown output mode)");
+        }
         return Ok(AuthInfo {
             authenticated: false,
             source: None,
@@ -148,18 +156,73 @@ fn read_coindex_token() -> Result<Option<String>> {
     Ok(Some(token))
 }
 
-fn save_coindex_token(token: &str) -> Result<()> {
+pub fn save_coindex_token(token: &str) -> Result<()> {
     let path = coindex_auth_file()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    let existing_vscode = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<CoindexAuthFile>(&raw).ok())
+            .and_then(|f| f.vscode_refresh)
+    } else {
+        None
+    };
     let data = CoindexAuthFile {
         refresh: token.to_string(),
+        vscode_refresh: existing_vscode,
     };
     let json = serde_json::to_string_pretty(&data)?;
     std::fs::write(&path, &json).with_context(|| format!("failed to write {}", path.display()))?;
     info!("saved token to {}", path.display());
+    Ok(())
+}
+
+pub fn read_vscode_token() -> Result<Option<String>> {
+    let path = coindex_auth_file()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed: CoindexAuthFile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    match parsed.vscode_refresh {
+        Some(t) if !t.trim().is_empty() => {
+            info!("found VS Code token at {}", path.display());
+            Ok(Some(t.trim().to_string()))
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn save_vscode_token(token: &str) -> Result<()> {
+    let path = coindex_auth_file()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let existing_refresh = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<CoindexAuthFile>(&raw).ok())
+            .map(|f| f.refresh)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if existing_refresh.is_empty() {
+        bail!("cannot save VS Code token: no primary token found in {}", path.display());
+    }
+    let data = CoindexAuthFile {
+        refresh: existing_refresh,
+        vscode_refresh: Some(token.to_string()),
+    };
+    let json = serde_json::to_string_pretty(&data)?;
+    std::fs::write(&path, &json).with_context(|| format!("failed to write {}", path.display()))?;
+    info!("saved VS Code token to {}", path.display());
     Ok(())
 }
 
@@ -194,6 +257,18 @@ fn read_opencode_token() -> Result<Option<String>> {
 }
 
 async fn device_flow_token() -> Result<String> {
+    device_flow_token_with_scope("user:email").await
+}
+
+pub async fn device_flow_token_with_scope(scope: &str) -> Result<String> {
+    device_flow_token_with_client(CLIENT_ID, scope).await
+}
+
+pub async fn vscode_device_flow_token(scope: &str) -> Result<String> {
+    device_flow_token_with_client(VSCODE_CLIENT_ID, scope).await
+}
+
+async fn device_flow_token_with_client(client_id: &str, scope: &str) -> Result<String> {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
@@ -204,7 +279,7 @@ async fn device_flow_token() -> Result<String> {
 
     let device: DeviceCodeResponse = http
         .post("https://github.com/login/device/code")
-        .form(&[("client_id", CLIENT_ID), ("scope", "user:email")])
+        .form(&[("client_id", client_id), ("scope", scope)])
         .send()
         .await
         .context("failed to request device code")?
@@ -229,7 +304,7 @@ async fn device_flow_token() -> Result<String> {
         let resp: AccessTokenResponse = http
             .post("https://github.com/login/oauth/access_token")
             .form(&[
-                ("client_id", CLIENT_ID),
+                ("client_id", client_id),
                 ("device_code", device.device_code.as_str()),
                 ("grant_type", grant_type),
             ])

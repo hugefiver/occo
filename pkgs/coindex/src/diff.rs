@@ -122,6 +122,56 @@ pub fn get_git_binary_files(repo_path: &Path) -> Result<HashSet<String>> {
     Ok(all_files.difference(&text_files).cloned().collect())
 }
 
+pub fn get_github_remote(repo_path: &Path) -> Result<Option<(String, String)>> {
+    let output = run_git(repo_path, &["remote", "-v"])?;
+    let mut origin: Option<(String, String)> = None;
+    let mut any: Option<(String, String)> = None;
+
+    for line in output.lines() {
+        if !line.contains("(fetch)") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let remote_name = parts[0];
+        let url = parts[1];
+        if let Some(nwo) = parse_github_nwo(url) {
+            if remote_name == "origin" {
+                return Ok(Some(nwo));
+            }
+            if origin.is_none() {
+                origin = Some(nwo.clone());
+            }
+            if any.is_none() {
+                any = Some(nwo);
+            }
+        }
+    }
+    Ok(origin.or(any))
+}
+
+fn parse_github_nwo(url: &str) -> Option<(String, String)> {
+    let path = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else {
+        return None;
+    };
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.splitn(2, '/');
+    let owner = parts.next()?.trim();
+    let name = parts.next()?.trim();
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), name.to_string()))
+}
+
 /// Check which paths are ignored by .gitignore rules.
 /// Uses `git check-ignore --stdin` for efficient batch checking.
 /// Returns the set of ignored paths as normalized forward-slash strings.

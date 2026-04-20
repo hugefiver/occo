@@ -10,8 +10,8 @@ use tracing::debug;
 
 use crate::types::{
     BatchRequest, BatchResponse, CreateIngestRequest, CreateIngestResponse, DeleteFilesetRequest,
-    FinalizeRequest, ListFilesetsResponse, SearchRequest, SearchResponse, UploadDocumentRequest,
-    UploadSymbolsRequest, UploadSymbolsResponse,
+    FinalizeRequest, IndexStatusResponse, ListFilesetsResponse, SearchRequest, SearchResponse,
+    UploadDocumentRequest, UploadSymbolsRequest, UploadSymbolsResponse,
 };
 
 const BASE_URL: &str = "https://api.github.com";
@@ -35,12 +35,20 @@ impl IngestClient {
         auth.set_sensitive(true);
         headers.insert(AUTHORIZATION, auth);
         headers.insert(
-            "X-Client-Application",
+            "Editor-Version",
             HeaderValue::from_static("vscode/1.115.0"),
         );
         headers.insert(
-            "X-Client-Source",
+            "Editor-Plugin-Version",
             HeaderValue::from_static("copilot-chat/0.43.0"),
+        );
+        headers.insert(
+            "Copilot-Integration-Id",
+            HeaderValue::from_static("vscode-chat"),
+        );
+        headers.insert(
+            "X-GitHub-Api-Version",
+            HeaderValue::from_static("2022-11-28"),
         );
 
         let http = reqwest::Client::builder()
@@ -353,6 +361,84 @@ impl IngestClient {
     pub async fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
         self.post_json_with_rate_limit("/external/embeddings/code/search", &req, "search")
             .await
+    }
+
+    /// Search GitHub's remote semantic index (auto-built for GitHub repos).
+    /// Uses `/embeddings/code/search` (no `/external` prefix).
+    pub async fn search_github(&self, req: SearchRequest) -> Result<SearchResponse> {
+        self.post_json_with_rate_limit("/embeddings/code/search", &req, "search_github")
+            .await
+    }
+
+    /// Check if a GitHub repository has a semantic index available.
+    pub async fn check_github_index(&self, repo_nwo: &str) -> Result<IndexStatusResponse> {
+        let url = self.url(&format!("/repos/{repo_nwo}/copilot_internal/embeddings_index"));
+        let mut throttle_retries = 0u32;
+        let mut network_retries = 0u32;
+        loop {
+            if throttle_retries > 5 {
+                bail!("check_github_index exceeded 429 retry attempts");
+            }
+
+            let response = match self.http.get(&url).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if network_retries >= 3 {
+                        return Err(anyhow!(
+                            "check_github_index network error after {} retries: {err}",
+                            network_retries
+                        ));
+                    }
+                    network_retries += 1;
+                    let backoff = 1u64 << network_retries;
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                let payload: IndexStatusResponse = response
+                    .json()
+                    .await
+                    .context("failed to decode check_github_index response")?;
+                return Ok(payload);
+            }
+
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                throttle_retries += 1;
+                let wait = retry_after_secs(response.headers()).unwrap_or(1);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
+            }
+
+            let body = response_text(response).await;
+            bail!("check_github_index failed with status {status}: {body}");
+        }
+    }
+
+    /// Trigger GitHub to build a semantic index for a repository.
+    pub async fn trigger_github_indexing(&self, repo_nwo: &str) -> Result<()> {
+        let url = self.url(&format!(
+            "/repos/{repo_nwo}/copilot_internal/embeddings_index"
+        ));
+        let body = serde_json::json!({ "auto": true });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("trigger_github_indexing request failed")?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response_text(response).await;
+            bail!("trigger_github_indexing returned {status}: {body}")
+        }
     }
 
     fn url(&self, path: &str) -> String {

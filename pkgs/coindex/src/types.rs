@@ -54,6 +54,8 @@ pub struct SearchRequest {
     pub scoping_query: String,
     pub embedding_model: String,
     pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_embeddings: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,12 +122,19 @@ pub struct SearchResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Location {
-    pub fileset: String,
-    pub checkpoint: String,
-    pub doc_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fileset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<Language>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "commitSha")]
+    pub commit_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<RepoInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,4 +162,66 @@ pub struct Chunk {
     pub line_range: Option<ChunkRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<ChunkRange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoInfo {
+    pub nwo: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchSource {
+    ExternalIngest(String),
+    GitHub(String),
+    VscodeLocal,
+}
+
+impl SearchSource {
+    pub fn label(&self) -> &str {
+        match self {
+            SearchSource::ExternalIngest(_) => "Ingest",
+            SearchSource::GitHub(_) => "GitHub",
+            SearchSource::VscodeLocal => "VSCode",
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            SearchSource::ExternalIngest(name) => name,
+            SearchSource::GitHub(nwo) => nwo,
+            SearchSource::VscodeLocal => "local",
+        }
+    }
+}
+
+impl std::fmt::Display for SearchSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.label(), self.name())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TaggedSearchResult {
+    pub source: SearchSource,
+    pub result: SearchResult,
+}
+
+pub struct HybridSearchResponse {
+    pub results: Vec<TaggedSearchResult>,
+    pub embedding_model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexStatusResponse {
+    #[serde(default)]
+    pub semantic_code_search_ok: bool,
+    #[serde(default)]
+    pub semantic_indexing_enabled: bool,
+    #[serde(default)]
+    pub semantic_commit_sha: Option<String>,
+    #[serde(default)]
+    pub can_index: Option<String>,
+    #[serde(default)]
+    pub lexical_search_ok: bool,
 }

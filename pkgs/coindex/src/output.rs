@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::IndexResult;
 use crate::auth::AuthInfo;
 use crate::state::FilesetState;
-use crate::types::{Fileset, ListFilesetsResponse, SearchResponse};
+use crate::types::{Fileset, HybridSearchResponse, IndexStatusResponse, ListFilesetsResponse};
+use crate::IndexResult;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
@@ -82,7 +82,7 @@ pub fn print_index(result: &IndexResult, format: OutputFormat) {
     }
 }
 
-pub fn print_search(response: &SearchResponse, format: OutputFormat) {
+pub fn print_search(response: &HybridSearchResponse, format: OutputFormat) {
     match format {
         OutputFormat::Plain => {
             if response.results.is_empty() {
@@ -91,26 +91,29 @@ pub fn print_search(response: &SearchResponse, format: OutputFormat) {
             }
             for (i, r) in response.results.iter().enumerate() {
                 let lang = r
+                    .result
                     .location
                     .language
                     .as_ref()
                     .map(|l| l.name.as_str())
                     .unwrap_or("?");
                 let lines = r
+                    .result
                     .chunk
                     .line_range
                     .as_ref()
                     .map(|lr| format!(" L{}-{}", lr.start, lr.end))
                     .unwrap_or_default();
                 println!(
-                    "[{}] {} ({}) dist={:.4}{}",
+                    "[{}] [{}] {} ({}) dist={:.4}{}",
                     i + 1,
-                    r.location.path,
+                    r.source.label(),
+                    r.result.location.path,
                     lang,
-                    r.distance,
+                    r.result.distance,
                     lines,
                 );
-                let text = r.chunk.text.replace('\n', "\n    ");
+                let text = r.result.chunk.text.replace('\n', "\n    ");
                 if text.len() > 500 {
                     let end = text
                         .char_indices()
@@ -124,9 +127,29 @@ pub fn print_search(response: &SearchResponse, format: OutputFormat) {
             }
         }
         OutputFormat::Json => {
+            let items: Vec<serde_json::Value> = response
+                .results
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "source": { "type": r.source.name(), "label": r.source.label() },
+                        "path": r.result.location.path,
+                        "language": r.result.location.language.as_ref().map(|l| &l.name),
+                        "distance": r.result.distance,
+                        "line_range": r.result.chunk.line_range.as_ref().map(|lr| {
+                            serde_json::json!({ "start": lr.start, "end": lr.end })
+                        }),
+                        "text": r.result.chunk.text,
+                    })
+                })
+                .collect();
             println!(
                 "{}",
-                serde_json::to_string_pretty(response).unwrap_or_default()
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "embedding_model": response.embedding_model,
+                    "results": items,
+                }))
+                .unwrap_or_default()
             );
         }
         OutputFormat::Markdown => {
@@ -136,24 +159,33 @@ pub fn print_search(response: &SearchResponse, format: OutputFormat) {
             }
             for (i, r) in response.results.iter().enumerate() {
                 let lang = r
+                    .result
                     .location
                     .language
                     .as_ref()
                     .map(|l| l.name.as_str())
                     .unwrap_or("unknown");
                 let lines = r
+                    .result
                     .chunk
                     .line_range
                     .as_ref()
                     .map(|lr| format!("L{}-{}", lr.start, lr.end))
                     .unwrap_or_default();
-                println!("### {}. `{}` ({})", i + 1, r.location.path, lang);
+                println!(
+                    "### {}. `{}` ({}) [{}]",
+                    i + 1,
+                    r.result.location.path,
+                    lang,
+                    r.source.label()
+                );
                 if !lines.is_empty() {
-                    println!("{} · distance: {:.4}\n", lines, r.distance);
+                    println!("{} · distance: {:.4}\n", lines, r.result.distance);
                 } else {
-                    println!("distance: {:.4}\n", r.distance);
+                    println!("distance: {:.4}\n", r.result.distance);
                 }
-                println!("```{}\n{}\n```\n", lang.to_lowercase(), r.chunk.text);
+                let text = r.result.chunk.text.as_str();
+                println!("```{}\n{}\n```\n", lang.to_lowercase(), text);
             }
         }
     }
@@ -232,6 +264,7 @@ pub fn print_project_status(
     fileset_name: &str,
     fileset: Option<&Fileset>,
     local: Option<&FilesetState>,
+    github: Option<&(String, Option<IndexStatusResponse>)>,
     format: OutputFormat,
 ) {
     match format {
@@ -257,6 +290,25 @@ pub fn print_project_status(
                     s.indexed_at,
                 );
             }
+            if let Some((nwo, status)) = github {
+                match status {
+                    Some(s) => {
+                        let semantic = if s.semantic_code_search_ok {
+                            "ready"
+                        } else {
+                            "not available"
+                        };
+                        let commit = s.semantic_commit_sha.as_deref().unwrap_or("none");
+                        println!(
+                            "GitHub: {}  semantic={}  commit={}",
+                            nwo,
+                            semantic,
+                            &commit[..commit.len().min(12)]
+                        );
+                    }
+                    None => println!("GitHub: {}  (could not check status)", nwo),
+                }
+            }
         }
         OutputFormat::Json => {
             let mut obj = serde_json::json!({
@@ -273,6 +325,16 @@ pub fn print_project_status(
                 obj["local_checkpoint"] = serde_json::Value::String(s.checkpoint.clone());
                 obj["local_files_indexed"] = serde_json::json!(s.files_indexed);
                 obj["local_indexed_at"] = serde_json::json!(s.indexed_at);
+            }
+            if let Some((nwo, status)) = github {
+                obj["github_repo"] = serde_json::Value::String(nwo.clone());
+                if let Some(s) = status {
+                    obj["github_semantic_ok"] = serde_json::json!(s.semantic_code_search_ok);
+                    obj["github_indexing_enabled"] = serde_json::json!(s.semantic_indexing_enabled);
+                    if let Some(sha) = &s.semantic_commit_sha {
+                        obj["github_semantic_commit"] = serde_json::Value::String(sha.clone());
+                    }
+                }
             }
             println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
         }
@@ -300,6 +362,24 @@ pub fn print_project_status(
                 println!("- **HEAD**: `{}`", &s.head[..s.head.len().min(12)]);
                 println!("- **Files indexed**: {}", s.files_indexed);
                 println!("- **Last indexed**: {}", s.indexed_at);
+            }
+            if let Some((nwo, status)) = github {
+                println!("\n### GitHub Remote Index\n");
+                println!("- **Repository**: {nwo}");
+                match status {
+                    Some(s) => {
+                        let semantic = if s.semantic_code_search_ok {
+                            "✅ Ready"
+                        } else {
+                            "❌ Not available"
+                        };
+                        println!("- **Semantic search**: {semantic}");
+                        if let Some(sha) = &s.semantic_commit_sha {
+                            println!("- **Indexed commit**: `{}`", &sha[..sha.len().min(12)]);
+                        }
+                    }
+                    None => println!("- Could not check status"),
+                }
             }
         }
     }
