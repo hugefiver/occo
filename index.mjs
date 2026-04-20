@@ -219,7 +219,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 192000, output: 64000 },
-      options: { adaptiveThinking: true, effort: "medium" },
+      options: { effort: "medium" },
       variants: CLAUDE_OPUS_47_VARIANTS,
     },
     "claude-opus-4.6": {
@@ -508,15 +508,20 @@ export async function OccoAuthPlugin({ client }) {
         }
 
         // Tag models that support Anthropic Messages API.
-        // Priority: options.messagesApi > remote supported_endpoints > fallback list
+        // Priority: explicit model.api.npm > options.messagesApi > remote supported_endpoints > fallback list
         if (provider?.models) {
           for (const [id, model] of Object.entries(provider.models)) {
             const remote = cachedRemoteMap[id];
             const supports = remote?.capabilities?.supports;
-            const useMessages =
-              model.options?.messagesApi ??
-              remote?.supported_endpoints?.includes("/v1/messages") ??
-              MESSAGES_API_MODELS.has(id);
+
+            // If user explicitly set api.npm, respect it absolutely.
+            // Otherwise infer from options/remote/fallback.
+            const explicitNpm = model.api?.npm;
+            const useMessages = explicitNpm
+              ? explicitNpm === "@ai-sdk/anthropic"
+              : (model.options?.messagesApi ??
+                 remote?.supported_endpoints?.includes("/v1/messages") ??
+                 MESSAGES_API_MODELS.has(id));
 
             if (!useMessages) continue;
 
@@ -525,10 +530,16 @@ export async function OccoAuthPlugin({ client }) {
               supports?.adaptive_thinking === true;
             const maxBudget = supports?.max_thinking_budget;
 
-            model.api = {
-              npm: "@ai-sdk/anthropic",
-              url: `${resolvedApiUrl}/v1`,
-            };
+            // Only inject api when user did not specify it
+            if (!explicitNpm) {
+              model.api = {
+                npm: "@ai-sdk/anthropic",
+                url: `${resolvedApiUrl}/v1`,
+              };
+            } else {
+              // User set npm but may have left url unset; fill default base
+              model.api.url ??= `${resolvedApiUrl}/v1`;
+            }
 
             // Clean up user override flags + copilot-format from options
             if (!model.options) model.options = {};
