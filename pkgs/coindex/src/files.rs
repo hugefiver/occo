@@ -30,6 +30,7 @@ pub struct FilesSummary {
     pub files: Vec<FileEntry>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_files(
     paths: Vec<PathBuf>,
     no_ignore: bool,
@@ -99,19 +100,17 @@ pub fn run_files(
             continue;
         }
 
-        if ignored.contains(&normalized) {
-            if !include_ignored {
+        if ignored.contains(&normalized)
+            && !include_ignored {
                 continue;
             }
-        }
 
         let status = classify_file(&repo_root, relative, &normalized, &ignored, &git_binaries);
 
-        if !include_ignored {
-            if matches!(status, FileStatus::Skipped(SkipReason::SkipDir)) {
+        if !include_ignored
+            && matches!(status, FileStatus::Skipped(SkipReason::SkipDir)) {
                 continue;
             }
-        }
 
         entries.push(FileEntry {
             path: normalized,
@@ -325,7 +324,7 @@ impl TreeNode {
                 FileStatus::Skipped(_) => skip += 1,
             }
         }
-        for (_, child) in &self.children_dirs {
+        for child in self.children_dirs.values() {
             let (ci, cs) = child.count();
             inc += ci;
             skip += cs;
@@ -404,13 +403,12 @@ fn render_tree_node(
             continue;
         }
 
-        if let Some(max) = max_depth {
-            if current_depth >= max {
+        if let Some(max) = max_depth
+            && current_depth >= max {
                 let (inc, skip) = child.count();
                 println!("{prefix}{connector}{name}/ ({inc} included, {skip} skipped)");
                 continue;
             }
-        }
 
         println!("{prefix}{connector}{name}/");
         render_tree_node(
@@ -434,7 +432,7 @@ fn render_tree_node(
             "├── "
         };
         let label = match status {
-            FileStatus::Included => format!("{name}"),
+            FileStatus::Included => name.to_string(),
             FileStatus::Skipped(r) => format!("{name} ({r})"),
         };
         println!("{prefix}{connector}{label}");

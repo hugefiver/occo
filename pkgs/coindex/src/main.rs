@@ -822,6 +822,7 @@ fn relative_to_api_path(path: &Path) -> String {
 
 const EMBEDDING_MODEL: &str = "metis-1024-I16-Binary";
 
+#[allow(clippy::too_many_arguments)]
 async fn run_search(
     token: String,
     query: String,
@@ -872,8 +873,8 @@ async fn run_search(
         bail!("no search sources available: could not detect GitHub remote or fileset name");
     }
 
-    if auto_github_index {
-        if let Some(nwo) = &repo_nwo {
+    if auto_github_index
+        && let Some(nwo) = &repo_nwo {
             match client.check_github_index(nwo).await {
                 Ok(status) if !status.semantic_indexing_enabled => {
                     info!(repo = %nwo, "triggering GitHub semantic indexing");
@@ -884,7 +885,6 @@ async fn run_search(
                 _ => {}
             }
         }
-    }
 
     // Parallel search
     let github_fut = async {
