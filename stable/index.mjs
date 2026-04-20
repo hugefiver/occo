@@ -130,6 +130,15 @@ export async function OccoAuthPlugin({ client }) {
     thinking: { thinking_budget: 15999 },
   };
 
+  // Opus 4.7+: adaptive thinking only (no thinking_budget). Effort variants.
+  const CLAUDE_OPUS_47_VARIANTS = {
+    ...DISABLED_SDK_VARIANTS,
+    low: { effort: "low" },
+    medium: { effort: "medium" },
+    high: { effort: "high" },
+    max: { effort: "max" },
+  };
+
   // GPT reasoning effort variants (for mini models): default=high (via SDK)
   const GPT_REASONING_VARIANTS = {
     low: {
@@ -178,7 +187,8 @@ export async function OccoAuthPlugin({ client }) {
   // Context = min(max_context_window_tokens, max_output_tokens + max_prompt_tokens).
   //
   // Variant assignment:
-  //   claude-opus-4.5+ → thinking(16000) / max(32000)
+  //   claude-opus-4.7 → adaptive thinking + effort variants (low/medium/high/max), default=medium
+  //   claude-opus-4.5/4.6 → thinking(16000) / max(32000)
   //   claude-sonnet/haiku → thinking only (no max)
   //   gemini         → no variants
   //   gpt-5.1, gpt-5.2, gpt-5.4 (non-codex) → default(high) / low/medium/high/xhigh
@@ -202,6 +212,16 @@ export async function OccoAuthPlugin({ client }) {
     //   options: { thinking_budget: 16000 },
     //   variants: CLAUDE_OPUS_VARIANTS,
     // },
+    "claude-opus-4.7": {
+      name: "Claude Opus 4.7",
+      reasoning: true,
+      tool_call: true,
+      temperature: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
+      limit: { context: 192000, output: 64000 },
+      options: { adaptiveThinking: true, effort: "medium" },
+      variants: CLAUDE_OPUS_47_VARIANTS,
+    },
     "claude-opus-4.6": {
       name: "Claude Opus 4.6",
       reasoning: true,
