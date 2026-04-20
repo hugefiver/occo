@@ -194,7 +194,42 @@ async fn run(cli: Cli, format: OutputFormat) -> Result<()> {
         } => {
             let token = get_token(interactive).await?;
             let progress = interactive && !no_progress;
-            let result = run_index_core(token.clone(), path.clone(), since, no_ignore, dirty, thorough, progress).await?;
+
+            let effective_since = if !auto_github_index {
+                since
+            } else {
+                let repo_root = diff::get_repo_root(&path).ok();
+                let nwo = repo_root.as_ref().and_then(|root| {
+                    diff::get_github_remote(root).ok().flatten()
+                });
+                if let Some((owner, name)) = &nwo {
+                    let repo = format!("{owner}/{name}");
+                    let client = IngestClient::new(token.clone())?;
+                    match client.check_github_index(&repo).await {
+                        Ok(status) if status.semantic_code_search_ok => {
+                            if let Some(sha) = &status.semantic_commit_sha {
+                                info!(
+                                    repo = %repo,
+                                    remote_sha = %sha,
+                                    "GitHub remote index covers up to this commit, only indexing local delta"
+                                );
+                                since.or_else(|| Some(sha.clone()))
+                            } else {
+                                info!(repo = %repo, "GitHub remote index active but no commit SHA, doing full index");
+                                since
+                            }
+                        }
+                        _ => {
+                            info!("GitHub remote index not available, doing full index");
+                            since
+                        }
+                    }
+                } else {
+                    since
+                }
+            };
+
+            let result = run_index_core(token.clone(), path.clone(), effective_since, no_ignore, dirty, thorough, progress).await?;
             output::print_index(&result, format);
 
             if auto_github_index {
