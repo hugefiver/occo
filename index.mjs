@@ -427,6 +427,11 @@ export async function OccoAuthPlugin({ client }) {
       if (incoming.model.api.id.includes("gpt")) {
         output.maxOutputTokens = undefined;
       }
+      // Prevent @ai-sdk/anthropic from injecting toolStreaming field
+      if (incoming.model.api.npm === "@ai-sdk/anthropic") {
+        output.options = output.options ?? {};
+        output.options.toolStreaming = false;
+      }
     },
 
     "chat.headers": async (incoming, output) => {
