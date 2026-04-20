@@ -58,14 +58,14 @@ export async function OccoAuthPlugin({ client }) {
   // ---------------------------------------------------------------------------
   // Token refresh helper — reused at loader init and per-request
   // ---------------------------------------------------------------------------
-  async function refreshTokenIfNeeded(getAuth) {
+  async function refreshTokenIfNeeded(getAuth, force = false) {
     const info = await getAuth();
     if (!info || info.type !== "oauth") return info;
     if (!info.refresh) return info;
 
-    // Refresh if: no access token, or expired/about-to-expire
+    // Refresh if: forced, no access token, or expired/about-to-expire
     // (stored expires already has a 5-minute buffer baked in)
-    const needsRefresh = !info.access || info.expires < Date.now();
+    const needsRefresh = force || !info.access || info.expires < Date.now();
     if (!needsRefresh) return info;
 
     const response = await fetch(TOKEN_URL, {
@@ -131,11 +131,12 @@ export async function OccoAuthPlugin({ client }) {
   };
 
   // Opus 4.7+: adaptive thinking only (no thinking_budget). Effort variants.
+  // Override ALL SDK-injected variants. Disable low/medium, keep high/max, add xhigh.
   const CLAUDE_OPUS_47_VARIANTS = {
-    ...DISABLED_SDK_VARIANTS,
-    low: { effort: "low" },
-    medium: { effort: "medium" },
+    low: { disabled: true },
+    medium: { disabled: true },
     high: { effort: "high" },
+    xhigh: { effort: "xhigh" },
     max: { effort: "max" },
   };
 
@@ -187,7 +188,7 @@ export async function OccoAuthPlugin({ client }) {
   // Context = min(max_context_window_tokens, max_output_tokens + max_prompt_tokens).
   //
   // Variant assignment:
-  //   claude-opus-4.7 → adaptive thinking + effort variants (low/medium/high/max), default=medium
+  //   claude-opus-4.7 → adaptive thinking + effort variants (high/xhigh/max), default=high
   //   claude-opus-4.5/4.6 → thinking(16000) / max(32000)
   //   claude-sonnet/haiku → thinking only (no max)
   //   gemini         → no variants
@@ -219,7 +220,7 @@ export async function OccoAuthPlugin({ client }) {
       temperature: true,
       modalities: { input: ["text", "image"], output: ["text"] },
       limit: { context: 192000, output: 64000 },
-      options: { effort: "medium" },
+      options: { effort: "high" },
       variants: CLAUDE_OPUS_47_VARIANTS,
     },
     "claude-opus-4.6": {
