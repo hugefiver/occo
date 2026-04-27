@@ -1,3 +1,5 @@
+import { getModels } from "./models.mjs";
+
 /**
  * @type {import('@opencode-ai/plugin').Plugin}
  */
@@ -58,8 +60,7 @@ export async function OccoAuthPlugin({ client }) {
   // ---------------------------------------------------------------------------
   // Token refresh helper — reused at loader init and per-request
   // ---------------------------------------------------------------------------
-  async function refreshTokenIfNeeded(getAuth) {
-    const info = await getAuth();
+  async function refreshAuthInfo(info) {
     if (!info || info.type !== "oauth") return info;
     if (!info.refresh) return info;
 
@@ -97,6 +98,10 @@ export async function OccoAuthPlugin({ client }) {
     info.access = tokenData.token;
     info.expires = tokenData.expires_at * 1000 - 5 * 60 * 1000;
     return info;
+  }
+
+  async function refreshTokenIfNeeded(getAuth) {
+    return refreshAuthInfo(await getAuth());
   }
 
   // ---------------------------------------------------------------------------
@@ -439,6 +444,40 @@ export async function OccoAuthPlugin({ client }) {
     },
 
     // -------------------------------------------------------------------------
+    // Dynamic model discovery from Copilot /models endpoint.
+    // Falls back to hardcoded MODELS when auth is missing or the request fails.
+    // This hook is forward-compatible with @opencode-ai/plugin >=1.2.x.
+    // -------------------------------------------------------------------------
+    provider: {
+      id: "occo",
+      async models(provider, ctx) {
+        const auth = ctx?.auth;
+        const fallbackModels = provider?.models ?? MODELS;
+        if (auth?.type !== "oauth") {
+          return fallbackModels;
+        }
+
+        try {
+          const refreshedAuth = await refreshAuthInfo(auth);
+          if (!refreshedAuth?.access) {
+            return fallbackModels;
+          }
+
+          const baseURL = resolvedApiUrl;
+          const headers = {
+            Authorization: `Bearer ${refreshedAuth.access}`,
+            ...HEADERS,
+          };
+
+          return await getModels(baseURL, headers, fallbackModels);
+        } catch (error) {
+          console.error("Failed to fetch Copilot models, using fallback", error);
+          return fallbackModels;
+        }
+      },
+    },
+
+    // -------------------------------------------------------------------------
     // Subagent quota protection: mark subagent sessions with x-initiator header
     // so they don't consume user's Copilot quota
     // -------------------------------------------------------------------------
@@ -485,8 +524,18 @@ export async function OccoAuthPlugin({ client }) {
         const info = await getAuth();
         if (!info || info.type !== "oauth") return {};
 
-        // Proactive token refresh on plugin load
-        const refreshedInfo = await refreshTokenIfNeeded(getAuth);
+        // Proactive token refresh on plugin load. This must never block
+        // provider initialization, otherwise opencode drops OCCO before the
+        // hardcoded model fallback can be displayed.
+        let refreshedInfo = info;
+        try {
+          refreshedInfo = await refreshTokenIfNeeded(getAuth);
+        } catch (error) {
+          console.error(
+            "Failed to refresh Copilot token during provider init, using fallback models",
+            error,
+          );
+        }
 
         // Fetch remote model capabilities (updates cache; non-fatal)
         if (refreshedInfo?.access) {
@@ -505,7 +554,12 @@ export async function OccoAuthPlugin({ client }) {
               }
               cachedRemoteMap = map;
             }
-          } catch {}
+          } catch (error) {
+            console.error(
+              "Failed to fetch Copilot model capabilities, using fallback metadata",
+              error,
+            );
+          }
         }
 
         // Tag models that support Anthropic Messages API.
@@ -521,8 +575,8 @@ export async function OccoAuthPlugin({ client }) {
             const useMessages = explicitNpm
               ? explicitNpm === "@ai-sdk/anthropic"
               : (model.options?.messagesApi ??
-                 remote?.supported_endpoints?.includes("/v1/messages") ??
-                 MESSAGES_API_MODELS.has(id));
+                remote?.supported_endpoints?.includes("/v1/messages") ??
+                MESSAGES_API_MODELS.has(id));
 
             if (!useMessages) continue;
 
