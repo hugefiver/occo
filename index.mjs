@@ -139,10 +139,10 @@ export async function OccoAuthPlugin({ client }) {
   // Override ALL SDK-injected variants. Disable low/medium, keep high/max, add xhigh.
   const CLAUDE_OPUS_47_VARIANTS = {
     low: { disabled: true },
-    medium: { disabled: true },
-    high: { effort: "high" },
-    xhigh: { effort: "xhigh" },
-    max: { effort: "max" },
+    medium: { effort: "medium" },
+    // high: { effort: "high" },
+    // xhigh: { effort: "xhigh" },
+    // max: { effort: "max" },
   };
 
   // GPT reasoning effort variants (for mini models): default=high (via SDK)
@@ -471,7 +471,10 @@ export async function OccoAuthPlugin({ client }) {
 
           return await getModels(baseURL, headers, fallbackModels);
         } catch (error) {
-          console.error("Failed to fetch Copilot models, using fallback", error);
+          console.error(
+            "Failed to fetch Copilot models, using fallback",
+            error,
+          );
           return fallbackModels;
         }
       },
